@@ -43,6 +43,7 @@ SCOPES = [
 ]
 MASK = "********"
 MIN_FREE_GB = 2
+LATIN_LANGS = {"en", "es", "fr", "de", "it", "pt", "nl", "sv", "no", "da", "fi", "pl", "cs", "ro", "hu", "tr", "id", "ms", "vi", "tl"}
 
 GLOBAL_DEFAULTS = {
     "active_profile": "default",
@@ -52,6 +53,7 @@ GLOBAL_DEFAULTS = {
     "ollama_url": "http://localhost:11434",
     "ollama_model": "llama3.1:8b",
     "vision_model": "llama3.2-vision",
+    "ollama_timeout": 300,
     "gemini_api_key": "",
     "veo_model": "veo-3.0-fast-generate-001",
     "aspect_ratio": "9:16",
@@ -71,6 +73,7 @@ PROFILE_DEFAULTS = {
     "trending_days": 7,
     "category_id": "",
     "region_code": "US",
+    "source_language": "en",
     "trending_count": 25,
     "videos_per_day": 0,
     "minutes_between_videos": 0,
@@ -98,7 +101,8 @@ Return JSON only: {"safe": true or false, "reason": "short explanation"}"""
 
 KIDS_BANNED = re.compile(
     r"\b(kill\w*|blood\w*|bleed\w*|guns?|knife|knives|swords?|weapons?|bombs?|murder\w*|dead|die|dies|dying|death|"
-    r"scary|terrif\w*|horror|creepy|nightmare\w*|sexy|kiss\w*|beer|wine|drunk|cigar\w*|smok\w*|drugs?|vape\w*|hate)\b",
+    r"scary|spooky|terrif\w*|horror|creepy|nightmare\w*|ghost\w*|haunt\w*|zombie\w*|demon\w*|devil\w*|bhoot|"
+    r"sexy|kiss\w*|beer|wine|drunk|cigar\w*|smok\w*|drugs?|vape\w*|hate)\b",
     re.I,
 )
 KIDS_CONTACT = re.compile(
@@ -380,16 +384,41 @@ def map_videos(items):
             "channel": i["snippet"].get("channelTitle", ""),
             "description": i["snippet"].get("description", "")[:1500],
             "tags": i["snippet"].get("tags", [])[:20],
+            "language": (i["snippet"].get("defaultAudioLanguage") or i["snippet"].get("defaultLanguage") or "").lower(),
             "views": int(i.get("statistics", {}).get("viewCount", 0)),
         }
         for i in items
     ]
 
 
+def mostly_latin(text):
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return True
+    latin = sum(1 for c in letters if ord(c) < 0x250)
+    return latin / len(letters) >= 0.6
+
+
+def filter_language(videos, lang):
+    if not lang:
+        return videos
+    kept = []
+    for v in videos:
+        if v["language"] and not v["language"].startswith(lang):
+            continue
+        if lang in LATIN_LANGS and not mostly_latin(v["title"]):
+            continue
+        kept.append(v)
+    if len(kept) < len(videos):
+        logger.info("Skipped %d source videos not in language '%s'", len(videos) - len(kept), lang)
+    return kept
+
+
 def fetch_trending(s):
     yt = youtube_client(s["profile_id"])
     count = max(1, min(int(s["trending_count"]), 50))
     region = s["region_code"] or "US"
+    lang = s["source_language"].strip().lower()
     query = s["trending_query"].strip()
     if query:
         after = (datetime.now(timezone.utc) - timedelta(days=max(1, int(s["trending_days"])))).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -403,11 +432,13 @@ def fetch_trending(s):
             "regionCode": region,
             "maxResults": count,
         }
+        if lang:
+            params["relevanceLanguage"] = lang
         if s["category_id"]:
             params["videoCategoryId"] = s["category_id"]
         ids = [i["id"]["videoId"] for i in yt.search().list(**params).execute().get("items", []) if i.get("id", {}).get("videoId")]
         items = yt.videos().list(part="snippet,statistics", id=",".join(ids)).execute().get("items", []) if ids else []
-        logger.info("Search '%s' returned %d videos from the last %s days (region %s)", query, len(items), s["trending_days"], region)
+        logger.info("Search '%s' returned %d videos from the last %s days (region %s, language %s)", query, len(items), s["trending_days"], region, lang or "any")
     else:
         params = {
             "part": "snippet,statistics",
@@ -419,23 +450,31 @@ def fetch_trending(s):
             params["videoCategoryId"] = s["category_id"]
         items = yt.videos().list(**params).execute().get("items", [])
         logger.info("Fetched %d trending chart videos (region %s, category %s)", len(items), region, s["category_id"] or "all")
-    return map_videos(items)
+    return filter_language(map_videos(items), lang)
 
 
-def ollama_json(s, prompt, temperature=0.9, model=None, images=None):
+def ollama_json(s, prompt, temperature=0.9, model=None, images=None, num_predict=2048):
     url = f"{s['ollama_url'].rstrip('/')}/api/generate"
     model = model or s["ollama_model"]
+    timeout = max(30, int(s["ollama_timeout"]))
     payload = {
         "model": model,
         "prompt": prompt,
         "format": "json",
         "stream": False,
-        "options": {"temperature": temperature},
+        "keep_alive": "30m",
+        "options": {"temperature": temperature, "num_predict": num_predict, "num_ctx": 8192},
     }
     if images:
         payload["images"] = images
     started = datetime.now()
-    r = requests.post(url, json=payload, timeout=900)
+    logger.debug("Waiting on Ollama %s (timeout %ds)", model, timeout)
+    try:
+        r = requests.post(url, json=payload, timeout=(10, timeout))
+    except requests.exceptions.ReadTimeout:
+        raise RuntimeError(f"Ollama model '{model}' did not respond within {timeout}s. Check 'ollama ps' and free RAM, or use a smaller model")
+    except requests.exceptions.ConnectionError:
+        raise RuntimeError(f"Cannot reach Ollama at {s['ollama_url']}. Is it running?")
     if r.status_code == 404:
         raise RuntimeError(f"Ollama model '{model}' not found. Run: ollama pull {model}")
     r.raise_for_status()
@@ -466,7 +505,7 @@ Description: {src['description']}
 Tags: {', '.join(src['tags'])}
 
 {niche_block}{kids_block}{feedback_block}
-Identify the underlying topic and why it appeals to viewers. Then write a completely ORIGINAL {n * clip}-second YouTube Short.
+Identify the underlying topic and why it appeals to viewers. Then write a completely ORIGINAL {n * clip}-second YouTube Short in English.
 Do not reuse the source's title, script, characters, jokes, branding, or channel identity.
 Do not depict real people, celebrities, brands, logos, or copyrighted characters. Invent new characters.
 
@@ -537,7 +576,7 @@ Return JSON only: {{"tags": ["15 to 25 tags, most specific first"]}}"""
     for attempt in range(1, 3):
         check()
         try:
-            data = ollama_json(s, prompt)
+            data = ollama_json(s, prompt, num_predict=512)
             raw = data.get("tags", [])
             if isinstance(raw, str):
                 raw = raw.split(",")
@@ -583,7 +622,7 @@ Scenes:
 
 Return JSON only: {{"pass": true or false, "issues": ["each specific problem"]}}"""
     try:
-        data = ollama_json(s, prompt, temperature=0.1)
+        data = ollama_json(s, prompt, temperature=0.1, num_predict=1024)
     except Cancelled:
         raise
     except Exception as e:
@@ -639,7 +678,7 @@ def kids_vision_check(s, clip_path):
             raise RuntimeError(f"Could not extract frame at {t}s for vision check")
         images.append(base64.b64encode(frame.read_bytes()).decode())
         frame.unlink(missing_ok=True)
-    data = ollama_json(s, KIDS_VISION_PROMPT, temperature=0.1, model=model, images=images)
+    data = ollama_json(s, KIDS_VISION_PROMPT, temperature=0.1, model=model, images=images, num_predict=256)
     if not truthy(data.get("safe")):
         raise ValueError(f"Vision check rejected {clip_path.name}: {data.get('reason', 'no reason given')}")
     logger.info("Vision check passed for %s", clip_path.name)
@@ -750,8 +789,13 @@ def run_job(s):
     trending = fetch_trending(s)
     state = load_state()
     candidates = [v for v in sorted(trending, key=lambda v: -v["views"]) if v["id"] not in state["processed"]]
+    if kids:
+        safe = [v for v in candidates if not KIDS_BANNED.search(v["title"])]
+        if len(safe) < len(candidates):
+            logger.info("Skipped %d source videos with themes unsuitable for kids", len(candidates) - len(safe))
+        candidates = safe
     if not candidates:
-        logger.warning("No unprocessed trending videos, checking again in 30 minutes")
+        logger.warning("No usable trending videos, checking again in 30 minutes")
         set_stage("waiting for new trending videos")
         stop_event.wait(1800)
         return
@@ -947,6 +991,7 @@ async def post_settings(request: Request):
                 if k in PROFILE_DEFAULTS:
                     p[k] = coerce(PROFILE_DEFAULTS, k, v)
             g["storage_dir"] = g["storage_dir"].strip().strip('"') or "videos"
+            p["source_language"] = p["source_language"].lower()[:5]
             root = validate_storage(g["storage_dir"])
         except (TypeError, ValueError) as e:
             return JSONResponse({"detail": str(e)}, status_code=400)
