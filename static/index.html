@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Shorts Autopilot</title>
+<style>
+:root{--bg:#0f1115;--panel:#181b22;--border:#2a2f3a;--text:#e6e8ee;--muted:#8a93a6;--accent:#e53935;--ok:#43a047}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text)}
+header{display:flex;align-items:center;gap:16px;padding:14px 20px;border-bottom:1px solid var(--border)}
+header h1{font-size:18px;margin:0;flex:1}
+nav button{background:none;border:none;color:var(--muted);padding:8px 12px;cursor:pointer;font-size:14px}
+nav button.active{color:var(--text);border-bottom:2px solid var(--accent)}
+main{padding:20px;max-width:1100px;margin:0 auto}
+.panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:16px;overflow-x:auto}
+.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.btn{border:none;border-radius:8px;padding:10px 18px;font-size:15px;cursor:pointer;color:#fff;background:#3949ab;text-decoration:none;display:inline-block}
+.btn:disabled{opacity:.4;cursor:default}
+.btn.go{background:var(--ok);font-size:20px;padding:14px 40px}
+.btn.stop{background:var(--accent)}
+.btn.secondary{background:#394150}
+.stat{min-width:150px}
+.stat .k{color:var(--muted);font-size:12px}
+.stat .v{font-size:17px;margin-top:4px}
+.stat .v.small{font-size:13px;word-break:break-all}
+.stat select{min-width:200px;margin-top:4px}
+.badge{display:none;background:#6a1b9a;color:#fff;border-radius:10px;padding:3px 10px;font-size:12px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);vertical-align:top}
+th{color:var(--muted);font-weight:500}
+.tab{display:none}.tab.active{display:block}
+#log{background:#0a0c10;border:1px solid var(--border);border-radius:8px;height:65vh;overflow:auto;padding:10px;font-family:Consolas,monospace;font-size:12px;white-space:pre-wrap}
+.ERROR,.CRITICAL{color:#ef5350}.WARNING{color:#ffb74d}.DEBUG{color:#78909c}
+label{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
+input,select{width:100%;padding:8px;background:#0f1115;border:1px solid var(--border);border-radius:6px;color:var(--text)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px}
+.grid h3{grid-column:1/-1;margin:10px 0 0;font-size:14px;color:var(--text);border-bottom:1px solid var(--border);padding-bottom:6px}
+.grid .wide{grid-column:1/-1}
+.hint{font-size:11px;color:var(--muted);margin-top:3px;word-break:break-all}
+a{color:#64b5f6}
+.pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;background:#394150}
+.pill.published{background:#1b5e20}.pill.failed{background:#b71c1c}.pill.running{background:#e65100}.pill.review{background:#6a1b9a}
+</style>
+</head>
+<body>
+<header>
+<h1>Shorts Autopilot</h1>
+<nav>
+<button data-tab="dash" class="active">Dashboard</button>
+<button data-tab="settings">Settings</button>
+<button data-tab="logs">Log</button>
+</nav>
+</header>
+<main>
+<section id="dash" class="tab active">
+<div class="panel row">
+<button id="go" class="btn go">GO</button>
+<button id="stop" class="btn stop">Stop</button>
+<div class="stat"><div class="k">Active profile</div><select id="prof-dash" class="prof-select"></select></div>
+<div class="stat"><div class="k">Status</div><div class="v" id="st-stage">idle</div></div>
+<div class="stat"><div class="k">Published today</div><div class="v" id="st-today">0</div></div>
+<div class="stat"><div class="k">Channel</div><div class="v" id="st-channel">Not linked</div></div>
+<span class="badge" id="kids-badge">Made for kids: compliance checks on</span>
+</div>
+<div class="panel row">
+<div class="stat"><div class="k">Storage folder</div><div class="v small" id="st-storage"></div></div>
+<div class="stat"><div class="k">Free space</div><div class="v" id="st-free">?</div></div>
+<div class="stat"><div class="k">After publishing</div><div class="v" id="st-after"></div></div>
+</div>
+<div class="panel row">
+<a class="btn secondary" href="/auth/start">Link YouTube channel to this profile</a>
+<button class="btn secondary" id="unlink">Unlink</button>
+<button class="btn secondary" id="preview">Preview trending</button>
+<span class="hint" id="preview-msg"></span>
+</div>
+<div class="panel" id="trending-panel" style="display:none"><h3>Trending</h3><table id="trending"></table></div>
+<div class="panel"><h3>Jobs</h3><table id="jobs"></table></div>
+</section>
+<section id="settings" class="tab">
+<div class="panel row">
+<div class="stat"><div class="k">Editing profile</div><select id="prof-set" class="prof-select"></select></div>
+<button class="btn secondary" id="new-profile">New profile</button>
+<button class="btn stop" id="del-profile">Delete profile</button>
+</div>
+<div class="panel">
+<div class="grid" id="settings-grid"></div>
+<div class="row" style="margin-top:16px"><button class="btn" id="save">Save settings</button><span id="saved" class="hint"></span></div>
+</div>
+</section>
+<section id="logs" class="tab">
+<div class="panel row">
+<label style="margin:0;display:flex;gap:6px;align-items:center"><input type="checkbox" id="autoscroll" checked style="width:auto">Auto scroll</label>
+<button class="btn secondary" id="clear">Clear view</button>
+<a href="/api/logs/download">Download full log</a>
+</div>
+<div id="log"></div>
+</section>
+</main>
+<script>
+const CATS="1=Film and Animation|2=Autos and Vehicles|10=Music|15=Pets and Animals|17=Sports|19=Travel and Events|20=Gaming|22=People and Blogs|23=Comedy|24=Entertainment|25=News and Politics|26=Howto and Style|27=Education|28=Science and Technology";
+const FIELDS=[
+["","Profile: audience and channel","header","",""],
+["name","Profile name","text","","p"],
+["channel_niche","Channel niche","wide","Steers every script, e.g. 60 second animated movies for kids ages 3 to 7","p"],
+["made_for_kids","Made for kids","checkbox","Flags uploads as made for kids and enforces child-safe rules, word filters, LLM compliance review, and frame vision checks","p"],
+["kids_manual_review","Hold kids videos for manual review","checkbox","Forces made-for-kids uploads to private so you can watch them before publishing","p"],
+["upload_category_id","Upload category","select:"+CATS,"","p"],
+["privacy_status","Upload privacy","select:private|unlisted|public","","p"],
+["trending_query","Trending search query","text","Blank uses the general trending chart. e.g. kids animated story","p"],
+["trending_days","Search window (days)","number","Only used with a search query","p"],
+["category_id","Source category","select:=All|"+CATS,"Filters source videos","p"],
+["region_code","Region","text","Two-letter country code, e.g. US","p"],
+["trending_count","Videos to scan","number","Max 50","p"],
+["videos_per_day","Videos per day","number","0 runs continuously","p"],
+["minutes_between_videos","Minutes between videos","number","0 for no gap","p"],
+["","Storage (shared by all profiles)","header","",""],
+["storage_dir","Storage folder","wide","Full path on a large disk, e.g. D:\\ShortsVideos. Jobs are built in output\\ and moved to published\\ after upload","g"],
+["delete_after_publish","Delete videos after publishing","checkbox","Removes the job folder once the upload succeeds instead of moving it to published","g"],
+["keep_clips","Keep individual clips","checkbox","Keeps the 8 second clips alongside final.mp4","g"],
+["","Generation (shared by all profiles)","header","",""],
+["ollama_url","Ollama URL","text","","g"],
+["ollama_model","Ollama model","text","Any pulled model, e.g. llama3.1:8b","g"],
+["vision_model","Ollama vision model","text","Required for made-for-kids profiles. Run: ollama pull llama3.2-vision","g"],
+["gemini_api_key","Gemini API key (Veo)","password","Billing must be enabled","g"],
+["veo_model","Veo model","text","Update if Google renames or retires the model","g"],
+["aspect_ratio","Aspect ratio","select:9:16|16:9","","g"],
+["target_seconds","Target length (seconds)","number","Split into clips of the length below","g"],
+["clip_seconds","Seconds per clip","number","Veo 3 clips are 8 seconds","g"],
+["error_cooldown_minutes","Wait after error (minutes)","number","","g"]
+];
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+async function api(path,opts={}){const r=await fetch(path,{headers:{"Content-Type":"application/json"},...opts});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.detail||r.statusText);return j}
+document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>{document.querySelectorAll("nav button").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));b.classList.add("active");$("#"+b.dataset.tab).classList.add("active")});
+function opt(o){const i=o.indexOf("=");return i<0?[o,o]:[o.slice(0,i),o.slice(i+1)]}
+function renderProfiles(list,active){
+document.querySelectorAll(".prof-select").forEach(sel=>{sel.innerHTML=list.map(p=>`<option value="${esc(p.id)}" ${p.id===active?"selected":""}>${esc(p.name)}${p.channel?" ("+esc(p.channel)+")":""}</option>`).join("")})}
+async function loadSettings(){
+const data=await api("/api/settings");
+renderProfiles(data.profiles,data.active);
+const g=$("#settings-grid");g.innerHTML="";
+for(const [k,label,type,hint,scope] of FIELDS){
+if(type==="header"){const h=document.createElement("h3");h.textContent=label;g.appendChild(h);continue}
+const s=scope==="g"?data.global:data.profile;
+let input;
+if(type.startsWith("select:")){input=`<select id="f-${k}">${type.slice(7).split("|").map(o=>{const [v,l]=opt(o);return `<option value="${esc(v)}" ${String(s[k])===v?"selected":""}>${esc(l)}</option>`}).join("")}</select>`}
+else if(type==="checkbox"){input=`<input type="checkbox" id="f-${k}" ${s[k]?"checked":""} style="width:auto">`}
+else{input=`<input type="${type==="wide"?"text":type}" id="f-${k}" value="${esc(s[k])}">`}
+let extra="";
+if(k==="storage_dir")extra=`<div class="hint">Resolves to: ${esc(data.storage_resolved)}</div>`;
+const d=document.createElement("div");if(type==="wide")d.className="wide";
+d.innerHTML=`<label>${label}</label>${input}${hint?`<div class="hint">${esc(hint)}</div>`:""}${extra}`;g.appendChild(d)}
+syncKidsFields()}
+function syncKidsFields(){
+const kids=$("#f-made_for_kids");const review=$("#f-kids_manual_review");
+if(!kids||!review)return;
+review.disabled=!kids.checked;review.closest("div").style.opacity=kids.checked?1:.5;
+kids.onchange=syncKidsFields}
+async function saveSettings(){
+const body={global:{},profile:{}};
+for(const [k,,type,,scope] of FIELDS){if(type==="header")continue;const el=$("#f-"+k);body[scope==="g"?"global":"profile"][k]=type==="checkbox"?el.checked:type==="number"?Number(el.value):el.value}
+try{await api("/api/settings",{method:"POST",body:JSON.stringify(body)});await loadSettings();$("#saved").textContent="Saved "+new Date().toLocaleTimeString();refresh()}catch(e){$("#saved").textContent="Error: "+e.message}}
+async function activate(id){try{await api("/api/profiles/activate",{method:"POST",body:JSON.stringify({id})})}catch(e){alert(e.message)}await loadSettings();refresh()}
+async function refresh(){
+try{
+const s=await api("/api/status");
+$("#st-stage").textContent=s.stage;
+$("#st-today").textContent=s.published_today+(s.videos_per_day>0?" / "+s.videos_per_day:"");
+$("#st-channel").textContent=s.channel||"Not linked";
+$("#st-storage").textContent=s.storage;
+$("#st-free").textContent=s.storage_free_gb===null?"not created yet":s.storage_free_gb+" GB";
+$("#st-free").style.color=s.storage_free_gb!==null&&s.storage_free_gb<10?"#ffb74d":"";
+$("#st-after").textContent=s.delete_after_publish?"Delete files":"Move to published";
+$("#kids-badge").style.display=s.made_for_kids?"inline-block":"none";
+$("#go").disabled=s.running;$("#stop").disabled=!s.running;
+$("#jobs").innerHTML="<tr><th>Started</th><th>Profile</th><th>Source</th><th>Title</th><th>Status</th><th>Video</th></tr>"+s.history.map(h=>`<tr><td>${esc(h.started)}</td><td>${esc(h.profile)}</td><td><a target="_blank" href="https://youtube.com/watch?v=${esc(h.source_id)}">${esc(h.source_title)}</a></td><td>${esc(h.title)}</td><td><span class="pill ${esc(h.status)}">${h.status==="review"?"private, needs review":esc(h.status)}</span>${h.error?`<div class="hint">${esc(h.error)}</div>`:""}${h.location?`<div class="hint">${esc(h.location)}</div>`:""}</td><td>${h.youtube_id?`<a target="_blank" href="https://studio.youtube.com/video/${esc(h.youtube_id)}/edit">studio</a> <a target="_blank" href="https://youtube.com/shorts/${esc(h.youtube_id)}">open</a>`:""}</td></tr>`).join("")
+}catch(e){}}
+let since=0;
+async function pollLogs(){
+try{
+const r=await api("/api/logs?since="+since);const box=$("#log");
+for(const [seq,level,line] of r.lines){const d=document.createElement("div");d.className=level;d.textContent=line;box.appendChild(d);since=seq}
+while(box.childElementCount>3000)box.firstChild.remove();
+if(r.lines.length&&$("#autoscroll").checked)box.scrollTop=box.scrollHeight
+}catch(e){}}
+document.querySelectorAll(".prof-select").forEach(sel=>sel.onchange=e=>activate(e.target.value));
+$("#new-profile").onclick=async()=>{
+const name=prompt("New profile name (starts as a copy of the current profile's settings)");
+if(!name)return;
+try{await api("/api/profiles",{method:"POST",body:JSON.stringify({name})});await loadSettings();refresh()}catch(e){alert(e.message)}};
+$("#del-profile").onclick=async()=>{
+const sel=$("#prof-set");const label=sel.options[sel.selectedIndex]?.text||"";
+if(!confirm(`Delete profile "${label}" and its linked channel token? Videos on disk are kept.`))return;
+try{await api("/api/profiles/delete",{method:"POST",body:JSON.stringify({id:sel.value})});await loadSettings();refresh()}catch(e){alert(e.message)}};
+$("#go").onclick=async()=>{await api("/api/start",{method:"POST"});refresh()};
+$("#stop").onclick=async()=>{await api("/api/stop",{method:"POST"});refresh()};
+$("#unlink").onclick=async()=>{if(confirm("Unlink the YouTube channel from this profile?")){await api("/auth/unlink",{method:"POST"});await loadSettings();refresh()}};
+$("#save").onclick=saveSettings;
+$("#clear").onclick=()=>{$("#log").innerHTML=""};
+$("#preview").onclick=async()=>{
+$("#preview-msg").textContent="Loading...";
+try{
+const r=await api("/api/trending");
+$("#trending").innerHTML="<tr><th>Views</th><th>Title</th><th>Channel</th></tr>"+r.items.map(v=>`<tr><td>${v.views.toLocaleString()}</td><td><a target="_blank" href="https://youtube.com/watch?v=${esc(v.id)}">${esc(v.title)}</a></td><td>${esc(v.channel)}</td></tr>`).join("");
+$("#trending-panel").style.display="block";$("#preview-msg").textContent=""
+}catch(e){$("#preview-msg").textContent="Error: "+e.message}};
+loadSettings();refresh();pollLogs();
+setInterval(refresh,3000);setInterval(pollLogs,2000);
+</script>
+</body>
+</html>
