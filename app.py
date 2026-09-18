@@ -44,6 +44,7 @@ SCOPES = [
 MASK = "********"
 MIN_FREE_GB = 2
 LATIN_LANGS = {"en", "es", "fr", "de", "it", "pt", "nl", "sv", "no", "da", "fi", "pl", "cs", "ro", "hu", "tr", "id", "ms", "vi", "tl"}
+REVIEW_MODES = ("advisory", "block", "off")
 
 GLOBAL_DEFAULTS = {
     "active_profile": "default",
@@ -55,7 +56,7 @@ GLOBAL_DEFAULTS = {
     "vision_model": "llama3.2-vision",
     "ollama_timeout": 300,
     "gemini_api_key": "",
-    "veo_model": "veo-3.0-fast-generate-001",
+    "veo_model": "veo-3.1-fast-generate-preview",
     "aspect_ratio": "9:16",
     "target_seconds": 60,
     "clip_seconds": 8,
@@ -67,6 +68,7 @@ PROFILE_DEFAULTS = {
     "channel_niche": "",
     "made_for_kids": False,
     "kids_manual_review": True,
+    "kids_llm_review": "advisory",
     "upload_category_id": "24",
     "privacy_status": "private",
     "trending_query": "",
@@ -90,6 +92,16 @@ Include a gentle lesson or positive message such as kindness, sharing, curiosity
 Visuals are bright, colorful, calm, friendly animation in safe, cheerful settings, with no flashing or strobing light.
 """
 
+REVIEW_RULES = {
+    "violence": "violence, weapons, injuries, blood, death, or dangerous acts a child could copy",
+    "scary": "scary, creepy, or disturbing imagery or events",
+    "humans": "realistic humans or real children as characters",
+    "adult": "romance, kissing, alcohol, tobacco, drugs, or other adult themes",
+    "commercial": "brand names, real products, toys for sale, or product placement",
+    "contact": "asking viewers to comment, like, subscribe, share personal information, visit a website, or leave YouTube",
+    "negative": "bullying, meanness, or a message that teaches bad behavior",
+}
+
 KIDS_VEO_SUFFIX = (
     " Child-friendly cartoon animation with cute non-human characters, soft bright colors, calm pacing, "
     "safe cheerful setting, nothing scary or dangerous, no realistic people, no logos, no flashing lights."
@@ -102,7 +114,7 @@ Return JSON only: {"safe": true or false, "reason": "short explanation"}"""
 KIDS_BANNED = re.compile(
     r"\b(kill\w*|blood\w*|bleed\w*|guns?|knife|knives|swords?|weapons?|bombs?|murder\w*|dead|die|dies|dying|death|"
     r"scary|spooky|terrif\w*|horror|creepy|nightmare\w*|ghost\w*|haunt\w*|zombie\w*|demon\w*|devil\w*|bhoot|"
-    r"sexy|kiss\w*|beer|wine|drunk|cigar\w*|smok\w*|drugs?|vape\w*|hate)\b",
+    r"sexy|(?<!sun-)(?<!sun )kiss\w*|beer|wine|drunk|cigar\w*|smok\w*|drugs?|vape\w*|hate)\b",
     re.I,
 )
 KIDS_CONTACT = re.compile(
@@ -591,6 +603,17 @@ Return JSON only: {{"tags": ["15 to 25 tags, most specific first"]}}"""
     return []
 
 
+def normalize_text(t):
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", str(t).lower())).strip()
+
+
+def script_text(script):
+    parts = [script["title"], script["description"], script["style"]]
+    for sc in script["scenes"]:
+        parts += [sc["visual"], sc["narration"]]
+    return " ".join(parts)
+
+
 def kids_rule_issues(script):
     issues = []
     texts = [script["title"], script["description"], script["style"]]
@@ -610,31 +633,62 @@ def kids_rule_issues(script):
 
 def kids_llm_review(s, script):
     scenes = "\n".join(f"{i}. Visual: {sc['visual']}\n   Narration: {sc['narration']}" for i, sc in enumerate(script["scenes"], 1))
-    prompt = f"""You are a strict compliance reviewer for YouTube videos that are made for kids, applying COPPA and YouTube's quality principles for kids content.
-Check this Short against every rule below. Reject it if any rule is broken or anything could upset, endanger, or mislead a young child.
+    rules = "\n".join(f"{k}: {v}" for k, v in REVIEW_RULES.items())
+    prompt = f"""You are a careful reviewer for a YouTube channel of cartoon stories for young children.
+Check the script below against each rule. A rule is only broken if specific words in the script clearly break it.
+Do not judge capitalization, punctuation, target age, art style, or anything not listed in the rules. Those are checked elsewhere.
 
-{KIDS_RULES}
+Rules (id: what is not allowed):
+{rules}
+
 Title: {script['title']}
 Description: {script['description']}
 Visual style: {script['style']}
 Scenes:
 {scenes}
 
-Return JSON only: {{"pass": true or false, "issues": ["each specific problem"]}}"""
+For every broken rule, copy the exact words from the script that break it.
+Return JSON only: {{"violations": [{{"rule": "rule id", "quote": "exact words copied from the script", "reason": "short explanation"}}]}}
+Return {{"violations": []}} if no rule is broken."""
     try:
         data = ollama_json(s, prompt, temperature=0.1, num_predict=1024)
     except Cancelled:
         raise
     except Exception as e:
-        return False, [f"compliance reviewer error: {e}"]
-    issues = [str(i) for i in data.get("issues", []) if str(i).strip()] if isinstance(data.get("issues"), list) else []
-    return truthy(data.get("pass")), issues
+        return [f"compliance reviewer error: {e}"], 0
+    raw = data.get("violations", [])
+    if not isinstance(raw, list):
+        return ["compliance reviewer returned an invalid response"], 0
+    haystack = normalize_text(script_text(script))
+    verified, ignored = [], 0
+    for v in raw:
+        if not isinstance(v, dict):
+            ignored += 1
+            continue
+        rule = str(v.get("rule", "")).strip().lower()
+        quote = normalize_text(v.get("quote", ""))
+        if rule not in REVIEW_RULES or len(quote) < 3 or quote not in haystack:
+            ignored += 1
+            logger.debug("Ignored unverified reviewer finding: %s", v)
+            continue
+        verified.append(f"{rule}: '{v.get('quote')}' ({v.get('reason', '')})")
+    return verified, ignored
+
+
+def review_mode(s):
+    mode = s["kids_llm_review"] if s["kids_llm_review"] in REVIEW_MODES else "advisory"
+    if mode == "advisory" and not s["kids_manual_review"]:
+        return "block"
+    return mode
 
 
 def produce_script(s, src):
     kids = bool(s["made_for_kids"])
     feedback = []
     attempts = 4 if kids else 1
+    mode = review_mode(s)
+    if kids and mode != s["kids_llm_review"]:
+        logger.info("LLM review switched to block mode because manual review is off")
     for attempt in range(1, attempts + 1):
         check()
         set_stage("writing script")
@@ -651,12 +705,24 @@ def produce_script(s, src):
         logger.info("Tags: %s", ", ".join(tags))
         set_stage("kids compliance review")
         issues = kids_rule_issues(script)
-        ok, llm_issues = kids_llm_review(s, script)
-        if not ok:
-            issues += llm_issues or ["reviewer rejected the script without details"]
+        notes, ignored = ([], 0) if mode == "off" else kids_llm_review(s, script)
+        if ignored:
+            logger.info("Ignored %d reviewer findings that did not quote the script or match a rule", ignored)
+        if mode == "block":
+            issues += notes
         if not issues:
-            logger.info("Kids compliance review passed on attempt %d", attempt)
-            return script, tags, {"kids_checks": True, "script_review": "passed", "attempts": attempt, "dropped_tags": dropped}
+            if notes:
+                logger.warning("Reviewer notes (advisory, check during manual review): %s", "; ".join(notes))
+            logger.info("Kids compliance review passed on attempt %d (LLM review: %s)", attempt, mode)
+            return script, tags, {
+                "kids_checks": True,
+                "script_review": "passed",
+                "attempts": attempt,
+                "dropped_tags": dropped,
+                "reviewer_mode": mode,
+                "reviewer_notes": notes,
+                "reviewer_ignored_findings": ignored,
+            }
         logger.warning("Kids compliance review failed (attempt %d/%d): %s", attempt, attempts, "; ".join(issues))
         feedback = issues
     raise RuntimeError(f"Script failed kids compliance review after {attempts} attempts")
@@ -784,7 +850,11 @@ def run_job(s):
     prepare_storage(s)
     logger.info("Profile: %s | Niche: %s | Made for kids: %s | Upload category: %s", s["name"], s["channel_niche"] or "none", kids, s["upload_category_id"])
     if kids:
-        logger.info("Kids compliance active: script rules, word filters, LLM review, frame vision checks, made-for-kids flag%s", ", manual review hold" if s["kids_manual_review"] else "")
+        logger.info(
+            "Kids compliance active: script rules, word filters, LLM review (%s), frame vision checks, made-for-kids flag%s",
+            review_mode(s),
+            ", manual review hold" if s["kids_manual_review"] else "",
+        )
     set_stage("fetching trending videos")
     trending = fetch_trending(s)
     state = load_state()
@@ -822,7 +892,7 @@ def run_job(s):
     finalized = False
     try:
         script, tags, compliance = produce_script(s, src)
-        update_history(job_id, title=script["title"])
+        update_history(job_id, title=script["title"], notes="; ".join(compliance.get("reviewer_notes", []))[:400])
         write_json(job_dir / "script.json", {"profile": s["name"], "source": src, "script": script, "tags": tags})
         client = genai.Client(api_key=s["gemini_api_key"])
         orientation = "Vertical" if s["aspect_ratio"] == "9:16" else "Widescreen"
@@ -992,6 +1062,8 @@ async def post_settings(request: Request):
                     p[k] = coerce(PROFILE_DEFAULTS, k, v)
             g["storage_dir"] = g["storage_dir"].strip().strip('"') or "videos"
             p["source_language"] = p["source_language"].lower()[:5]
+            if p["kids_llm_review"] not in REVIEW_MODES:
+                p["kids_llm_review"] = "advisory"
             root = validate_storage(g["storage_dir"])
         except (TypeError, ValueError) as e:
             return JSONResponse({"detail": str(e)}, status_code=400)

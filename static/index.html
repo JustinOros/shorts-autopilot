@@ -38,6 +38,7 @@ input,select{width:100%;padding:8px;background:#0f1115;border:1px solid var(--bo
 .grid h3{grid-column:1/-1;margin:10px 0 0;font-size:14px;color:var(--text);border-bottom:1px solid var(--border);padding-bottom:6px}
 .grid .wide{grid-column:1/-1}
 .hint{font-size:11px;color:var(--muted);margin-top:3px;word-break:break-all}
+.hint.notes{color:#ffb74d;word-break:normal}
 a{color:#64b5f6}
 .pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;background:#394150}
 .pill.published{background:#1b5e20}.pill.failed{background:#b71c1c}.pill.running{background:#e65100}.pill.review{background:#6a1b9a}
@@ -105,6 +106,7 @@ const FIELDS=[
 ["channel_niche","Channel niche","wide","Steers every script, e.g. 60 second animated movies for kids ages 3 to 7","p"],
 ["made_for_kids","Made for kids","checkbox","Flags uploads as made for kids and enforces child-safe rules, word filters, LLM compliance review, and frame vision checks","p"],
 ["kids_manual_review","Hold kids videos for manual review","checkbox","Forces made-for-kids uploads to private so you can watch them before publishing","p"],
+["kids_llm_review","LLM script review","select:advisory=Advisory (show notes, you review)|block=Block (reject flagged scripts)|off=Off","Advisory only applies while manual review is on, otherwise it blocks. Word filters and vision checks always block","p"],
 ["upload_category_id","Upload category","select:"+CATS,"","p"],
 ["privacy_status","Upload privacy","select:private|unlisted|public","","p"],
 ["trending_query","Trending search query","text","Blank uses the general trending chart. e.g. kids animated story","p"],
@@ -125,10 +127,10 @@ const FIELDS=[
 ["vision_model","Ollama vision model","text","Required for made-for-kids profiles. Run: ollama pull llama3.2-vision","g"],
 ["ollama_timeout","Ollama timeout (seconds)","number","Max wait per Ollama request before retrying","g"],
 ["gemini_api_key","Gemini API key (Veo)","password","Billing must be enabled","g"],
-["veo_model","Veo model","text","Update if Google renames or retires the model","g"],
+["veo_model","Veo model","text","e.g. veo-3.1-fast-generate-preview. Update if Google renames or retires the model","g"],
 ["aspect_ratio","Aspect ratio","select:9:16|16:9","","g"],
 ["target_seconds","Target length (seconds)","number","Split into clips of the length below","g"],
-["clip_seconds","Seconds per clip","number","Veo 3 clips are 8 seconds","g"],
+["clip_seconds","Seconds per clip","number","Veo clips are 8 seconds","g"],
 ["error_cooldown_minutes","Wait after error (minutes)","number","","g"]
 ];
 const $=s=>document.querySelector(s);
@@ -155,9 +157,9 @@ const d=document.createElement("div");if(type==="wide")d.className="wide";
 d.innerHTML=`<label>${label}</label>${input}${hint?`<div class="hint">${esc(hint)}</div>`:""}${extra}`;g.appendChild(d)}
 syncKidsFields()}
 function syncKidsFields(){
-const kids=$("#f-made_for_kids");const review=$("#f-kids_manual_review");
-if(!kids||!review)return;
-review.disabled=!kids.checked;review.closest("div").style.opacity=kids.checked?1:.5;
+const kids=$("#f-made_for_kids");
+if(!kids)return;
+for(const id of ["#f-kids_manual_review","#f-kids_llm_review"]){const el=$(id);if(!el)continue;el.disabled=!kids.checked;el.closest("div").style.opacity=kids.checked?1:.5}
 kids.onchange=syncKidsFields}
 async function saveSettings(){
 const body={global:{},profile:{}};
@@ -176,7 +178,7 @@ $("#st-free").style.color=s.storage_free_gb!==null&&s.storage_free_gb<10?"#ffb74
 $("#st-after").textContent=s.delete_after_publish?"Delete files":"Move to published";
 $("#kids-badge").style.display=s.made_for_kids?"inline-block":"none";
 $("#go").disabled=s.running;$("#stop").disabled=!s.running;
-$("#jobs").innerHTML="<tr><th>Started</th><th>Profile</th><th>Source</th><th>Title</th><th>Status</th><th>Video</th></tr>"+s.history.map(h=>`<tr><td>${esc(h.started)}</td><td>${esc(h.profile)}</td><td><a target="_blank" href="https://youtube.com/watch?v=${esc(h.source_id)}">${esc(h.source_title)}</a></td><td>${esc(h.title)}</td><td><span class="pill ${esc(h.status)}">${h.status==="review"?"private, needs review":esc(h.status)}</span>${h.error?`<div class="hint">${esc(h.error)}</div>`:""}${h.location?`<div class="hint">${esc(h.location)}</div>`:""}</td><td>${h.youtube_id?`<a target="_blank" href="https://studio.youtube.com/video/${esc(h.youtube_id)}/edit">studio</a> <a target="_blank" href="https://youtube.com/shorts/${esc(h.youtube_id)}">open</a>`:""}</td></tr>`).join("")
+$("#jobs").innerHTML="<tr><th>Started</th><th>Profile</th><th>Source</th><th>Title</th><th>Status</th><th>Video</th></tr>"+s.history.map(h=>`<tr><td>${esc(h.started)}</td><td>${esc(h.profile)}</td><td><a target="_blank" href="https://youtube.com/watch?v=${esc(h.source_id)}">${esc(h.source_title)}</a></td><td>${esc(h.title)}</td><td><span class="pill ${esc(h.status)}">${h.status==="review"?"private, needs review":esc(h.status)}</span>${h.notes?`<div class="hint notes">Reviewer notes: ${esc(h.notes)}</div>`:""}${h.error?`<div class="hint">${esc(h.error)}</div>`:""}${h.location?`<div class="hint">${esc(h.location)}</div>`:""}</td><td>${h.youtube_id?`<a target="_blank" href="https://studio.youtube.com/video/${esc(h.youtube_id)}/edit">studio</a> <a target="_blank" href="https://youtube.com/shorts/${esc(h.youtube_id)}">open</a>`:""}</td></tr>`).join("")
 }catch(e){}}
 let since=0;
 async function pollLogs(){
