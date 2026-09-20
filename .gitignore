@@ -1,5 +1,7 @@
 data/
 videos/
+models/
+tmp/
 client_secret.json
 __pycache__/
 *.pyc

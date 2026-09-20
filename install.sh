@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 TEXT_MODEL="${TEXT_MODEL:-llama3.1:8b}"
-VISION_MODEL="${VISION_MODEL:-llama3.2-vision}"
+VISION_MODEL="${VISION_MODEL:-moondream}"
 OLLAMA_URL="http://localhost:11434"
 OS="$(uname -s)"
 PYTHON=""
@@ -135,13 +135,13 @@ fi
 
 info "Updating .gitignore"
 touch .gitignore
-for entry in data/ videos/ client_secret.json __pycache__/ '*.pyc' .venv/; do
+for entry in data/ videos/ models/ tmp/ client_secret.json __pycache__/ '*.pyc' .venv/; do
   if ! grep -qxF "$entry" .gitignore; then
     echo "$entry" >> .gitignore
   fi
 done
 
-chmod +x run.sh 2>/dev/null || true
+chmod +x run.sh install-local.sh 2>/dev/null || true
 
 info "Checking setup"
 if [ -f client_secret.json ]; then
@@ -149,7 +149,8 @@ if [ -f client_secret.json ]; then
 else
   warn "client_secret.json is missing. Download it from Google Cloud and place it next to app.py"
 fi
-echo "After the app starts, paste your Gemini API key in Settings"
+echo "For the free local video engine, run ./install-local.sh next"
+echo "Models can also be added later from the Settings dropdowns"
 
 info "Install complete"
 echo "Start the app any time with: ./run.sh"

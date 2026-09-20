@@ -5,6 +5,8 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+import tempfile
 import threading
 from collections import deque
 from datetime import date, datetime, timedelta, timezone
@@ -14,9 +16,7 @@ from pathlib import Path
 import requests
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
-from google import genai
 from google.auth.transport.requests import Request as GoogleRequest
-from google.genai import types
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
@@ -45,16 +45,33 @@ MASK = "********"
 MIN_FREE_GB = 2
 LATIN_LANGS = {"en", "es", "fr", "de", "it", "pt", "nl", "sv", "no", "da", "fi", "pl", "cs", "ro", "hu", "tr", "id", "ms", "vi", "tl"}
 REVIEW_MODES = ("advisory", "block", "off")
+ENGINES = ("local", "veo")
+TTS_ENGINES = ("auto", "say", "espeak", "piper")
+SUGGESTED_TEXT_MODELS = ["llama3.1:8b", "llama3.2:3b", "qwen2.5:7b", "mistral:7b"]
+SUGGESTED_VISION_MODELS = ["moondream", "llava:7b", "llama3.2-vision", "qwen2.5vl:7b"]
+SMALL_VISION_MODELS = ("moondream", "llava-phi3", "bakllava")
 
 GLOBAL_DEFAULTS = {
     "active_profile": "default",
     "storage_dir": "videos",
+    "models_dir": "",
+    "temp_dir": "",
     "delete_after_publish": False,
     "keep_clips": False,
+    "video_engine": "local",
     "ollama_url": "http://localhost:11434",
     "ollama_model": "llama3.1:8b",
-    "vision_model": "llama3.2-vision",
+    "vision_model": "moondream",
     "ollama_timeout": 300,
+    "sd_model": "stabilityai/sdxl-turbo",
+    "sd_steps": 4,
+    "sd_guidance": 0,
+    "sd_width": 512,
+    "sd_height": 896,
+    "tts_engine": "auto",
+    "tts_voice": "Samantha",
+    "tts_rate": 170,
+    "piper_model": "",
     "gemini_api_key": "",
     "veo_model": "veo-3.1-fast-generate-preview",
     "aspect_ratio": "9:16",
@@ -107,9 +124,20 @@ KIDS_VEO_SUFFIX = (
     "safe cheerful setting, nothing scary or dangerous, no realistic people, no logos, no flashing lights."
 )
 
-KIDS_VISION_PROMPT = """These are still frames from a short video intended for young children.
-Mark it unsafe if ANY frame shows: realistic humans or children, violence, weapons, blood, injury, scary, creepy, or disturbing imagery, distorted or malformed faces or bodies, nudity or suggestive content, alcohol, tobacco, drugs, brand logos, readable text, or anything a parent would find inappropriate for a 4 year old.
+KIDS_IMAGE_SUFFIX = ", children's picture book illustration, cute cartoon characters, bright soft colors, cheerful and safe, gentle"
+
+IMAGE_NEGATIVE = (
+    "photorealistic, realistic human, real person, photograph, text, letters, words, watermark, logo, signature, "
+    "scary, creepy, horror, violence, weapon, blood, gore, deformed, distorted, extra limbs, ugly, blurry, low quality, nsfw"
+)
+
+KIDS_VISION_PROMPT = """This is a still frame from a short video intended for young children.
+Mark it unsafe if the image shows: realistic humans or children, violence, weapons, blood, injury, scary, creepy, or disturbing imagery, distorted or malformed faces or bodies, nudity or suggestive content, alcohol, tobacco, drugs, brand logos, readable text, or anything a parent would find inappropriate for a 4 year old.
 Return JSON only: {"safe": true or false, "reason": "short explanation"}"""
+
+VISION_TEXT_PROMPT = """Look at this image, which is meant for young children.
+Answer with one word, safe or unsafe, then a short reason.
+Answer unsafe if it shows realistic humans or children, violence, weapons, blood, injury, scary or creepy imagery, distorted faces or bodies, nudity, alcohol, tobacco, drugs, brand logos, or anything a parent would find inappropriate for a 4 year old."""
 
 KIDS_BANNED = re.compile(
     r"\b(kill\w*|blood\w*|bleed\w*|guns?|knife|knives|swords?|weapons?|bombs?|murder\w*|dead|die|dies|dying|death|"
@@ -151,6 +179,8 @@ for _h in (
 
 state_lock = threading.RLock()
 settings_lock = threading.RLock()
+pipe_lock = threading.Lock()
+pipeline = {"id": None, "obj": None}
 stop_event = threading.Event()
 runner = None
 pending_flow = None
@@ -159,6 +189,10 @@ status = {"running": False, "stage": "idle"}
 
 
 class Cancelled(Exception):
+    pass
+
+
+class VisionUnavailable(Exception):
     pass
 
 
@@ -204,6 +238,14 @@ def resolve_storage(path_str):
     return p if p.is_absolute() else BASE / p
 
 
+def resolve_sub(s, key, fallback):
+    raw = str(s.get(key, "")).strip().strip('"')
+    if raw:
+        p = Path(raw).expanduser()
+        return p if p.is_absolute() else BASE / p
+    return resolve_storage(s["storage_dir"]) / fallback
+
+
 def output_root(s):
     return resolve_storage(s["storage_dir"]) / "output"
 
@@ -212,16 +254,21 @@ def published_root(s):
     return resolve_storage(s["storage_dir"]) / "published"
 
 
-def validate_storage(path_str):
-    root = resolve_storage(path_str)
+def writable(root):
     try:
-        (root / "output").mkdir(parents=True, exist_ok=True)
-        (root / "published").mkdir(parents=True, exist_ok=True)
+        root.mkdir(parents=True, exist_ok=True)
         probe = root / ".write_test"
         probe.write_text("ok", encoding="utf-8")
         probe.unlink()
     except OSError as e:
-        raise ValueError(f"Storage folder '{root}' is not writable: {e}")
+        raise ValueError(f"Folder '{root}' is not writable: {e}")
+    return root
+
+
+def validate_storage(path_str):
+    root = writable(resolve_storage(path_str))
+    (root / "output").mkdir(parents=True, exist_ok=True)
+    (root / "published").mkdir(parents=True, exist_ok=True)
     return root
 
 
@@ -232,12 +279,24 @@ def free_gb(path):
         return None
 
 
+def apply_paths(s):
+    models = writable(resolve_sub(s, "models_dir", "models"))
+    temp = writable(resolve_sub(s, "temp_dir", "tmp"))
+    os.environ["HF_HOME"] = str(models)
+    os.environ["HF_HUB_CACHE"] = str(models / "hub")
+    os.environ["TORCH_HOME"] = str(models / "torch")
+    os.environ["TMPDIR"] = str(temp)
+    tempfile.tempdir = str(temp)
+    return models, temp
+
+
 def prepare_storage(s):
     root = validate_storage(s["storage_dir"])
     free = free_gb(root)
     if free is not None and free < MIN_FREE_GB:
         raise RuntimeError(f"Only {free:.1f} GB free at {root}, need at least {MIN_FREE_GB} GB")
-    logger.info("Storage: %s (%.1f GB free)", root, free or 0)
+    models, temp = apply_paths(s)
+    logger.info("Storage: %s (%.1f GB free) | Models: %s | Temp: %s", root, free or 0, models, temp)
 
 
 def finish_files(s, job_dir, job_id):
@@ -404,11 +463,12 @@ def map_videos(items):
 
 
 def mostly_latin(text):
-    letters = [c for c in text if c.isalpha()]
+    stripped = re.sub(r"#\S+|https?://\S+|@\S+", " ", str(text))
+    letters = [c for c in stripped if c.isalpha()]
     if not letters:
-        return True
+        return False
     latin = sum(1 for c in letters if ord(c) < 0x250)
-    return latin / len(letters) >= 0.6
+    return latin / len(letters) >= 0.8
 
 
 def filter_language(videos, lang):
@@ -465,18 +525,80 @@ def fetch_trending(s):
     return filter_language(map_videos(items), lang)
 
 
-def ollama_json(s, prompt, temperature=0.9, model=None, images=None, num_predict=2048):
+def ollama_tags(s):
+    try:
+        r = requests.get(f"{s['ollama_url'].rstrip('/')}/api/tags", timeout=10)
+        r.raise_for_status()
+        return sorted(m["name"] for m in r.json().get("models", []) if m.get("name"))
+    except Exception as e:
+        logger.debug("Could not list Ollama models: %s", e)
+        return []
+
+
+def ollama_has(s, model):
+    installed = ollama_tags(s)
+    return model in installed or f"{model}:latest" in installed
+
+
+def ollama_pull(s, model):
+    model = (model or "").strip()
+    if not model:
+        raise RuntimeError("No model name given")
+    if ollama_has(s, model):
+        return False
+    logger.info("Model '%s' is not installed, pulling it now (this can take a while)", model)
+    url = f"{s['ollama_url'].rstrip('/')}/api/pull"
+    last = ""
+    with requests.post(url, json={"model": model, "stream": True}, stream=True, timeout=(10, 3600)) as r:
+        r.raise_for_status()
+        for line in r.iter_lines():
+            check()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            if msg.get("error"):
+                raise RuntimeError(f"Could not pull '{model}': {msg['error']}")
+            st = msg.get("status", "")
+            total, done = msg.get("total"), msg.get("completed")
+            if total and done:
+                pct = int(done * 100 / total)
+                line_txt = f"{st} {pct}%"
+                if line_txt != last and pct % 10 == 0:
+                    logger.info("Pulling %s: %s", model, line_txt)
+                    last = line_txt
+            elif st and st != last:
+                logger.info("Pulling %s: %s", model, st)
+                last = st
+    logger.info("Model '%s' is ready", model)
+    return True
+
+
+def ensure_models(s, engine):
+    needed = [s["ollama_model"].strip()]
+    if s["made_for_kids"] and s["vision_model"].strip():
+        needed.append(s["vision_model"].strip())
+    for m in needed:
+        if m and not ollama_has(s, m):
+            set_stage(f"downloading model {m}")
+            ollama_pull(s, m)
+
+
+def ollama_call(s, prompt, temperature=0.9, model=None, images=None, num_predict=2048, as_json=True):
     url = f"{s['ollama_url'].rstrip('/')}/api/generate"
     model = model or s["ollama_model"]
     timeout = max(30, int(s["ollama_timeout"]))
     payload = {
         "model": model,
         "prompt": prompt,
-        "format": "json",
         "stream": False,
-        "keep_alive": "30m",
+        "keep_alive": "5m",
         "options": {"temperature": temperature, "num_predict": num_predict, "num_ctx": 8192},
     }
+    if as_json:
+        payload["format"] = "json"
     if images:
         payload["images"] = images
     started = datetime.now()
@@ -488,11 +610,17 @@ def ollama_json(s, prompt, temperature=0.9, model=None, images=None, num_predict
     except requests.exceptions.ConnectionError:
         raise RuntimeError(f"Cannot reach Ollama at {s['ollama_url']}. Is it running?")
     if r.status_code == 404:
-        raise RuntimeError(f"Ollama model '{model}' not found. Run: ollama pull {model}")
+        logger.warning("Ollama model '%s' is missing, pulling it now", model)
+        ollama_pull(s, model)
+        r = requests.post(url, json=payload, timeout=(10, timeout))
     r.raise_for_status()
     text = r.json().get("response", "")
     logger.debug("Ollama %s responded in %.1fs: %s", model, (datetime.now() - started).total_seconds(), text[:2000])
-    return json.loads(text)
+    return json.loads(text) if as_json else text
+
+
+def ollama_json(s, prompt, temperature=0.9, model=None, images=None, num_predict=2048):
+    return ollama_call(s, prompt, temperature=temperature, model=model, images=images, num_predict=num_predict, as_json=True)
 
 
 def write_script(s, src, feedback=None):
@@ -522,7 +650,7 @@ Do not reuse the source's title, script, characters, jokes, branding, or channel
 Do not depict real people, celebrities, brands, logos, or copyrighted characters. Invent new characters.
 
 The Short has exactly {n} scenes of {clip} seconds each. Each scene has:
-"visual": a detailed, self-contained cinematic shot description for an AI video model (subject, setting, action, camera, lighting). Repeat key character and setting details in every scene so they stay consistent.
+"visual": a detailed, self-contained shot description of one still image (subject, setting, action, mood, lighting). Repeat key character and setting details in every scene so they stay consistent. Never mention on-screen text or words.
 "narration": one spoken line of at most {words} words.
 
 Scene 1 must hook the viewer in the first 2 seconds. The final scene must deliver a payoff.
@@ -728,29 +856,194 @@ def produce_script(s, src):
     raise RuntimeError(f"Script failed kids compliance review after {attempts} attempts")
 
 
+def unload_pipeline():
+    with pipe_lock:
+        if pipeline["obj"] is None:
+            return
+        pipeline["obj"] = None
+        pipeline["id"] = None
+        try:
+            import gc
+            import torch
+            gc.collect()
+            if torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+            elif torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        logger.debug("Released image model from memory")
+
+
 def kids_vision_check(s, clip_path):
     model = s["vision_model"].strip()
     if not model:
         raise RuntimeError("Made for kids requires a vision model in Settings to check generated clips")
-    clip = int(s["clip_seconds"])
-    images = []
-    for idx, t in enumerate((0.5, clip / 2, max(0.5, clip - 0.5))):
-        frame = clip_path.with_name(f"{clip_path.stem}_f{idx}.jpg")
-        r = subprocess.run(
-            ["ffmpeg", "-y", "-ss", str(t), "-i", str(clip_path), "-frames:v", "1", "-vf", "scale=512:-2", str(frame)],
-            capture_output=True, text=True,
-        )
-        if r.returncode != 0 or not frame.exists():
-            raise RuntimeError(f"Could not extract frame at {t}s for vision check")
-        images.append(base64.b64encode(frame.read_bytes()).decode())
-        frame.unlink(missing_ok=True)
-    data = ollama_json(s, KIDS_VISION_PROMPT, temperature=0.1, model=model, images=images, num_predict=256)
-    if not truthy(data.get("safe")):
-        raise ValueError(f"Vision check rejected {clip_path.name}: {data.get('reason', 'no reason given')}")
+    frame = clip_path.with_name(f"{clip_path.stem}_frame.jpg")
+    r = subprocess.run(
+        ["ffmpeg", "-y", "-ss", str(int(s["clip_seconds"]) / 2), "-i", str(clip_path), "-frames:v", "1", "-vf", "scale=512:-2", str(frame)],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0 or not frame.exists():
+        raise RuntimeError("Could not extract a frame for the vision check")
+    images = [base64.b64encode(frame.read_bytes()).decode()]
+    frame.unlink(missing_ok=True)
+    if not model.split(":")[0] in SMALL_VISION_MODELS:
+        unload_pipeline()
+    safe, reason = True, ""
+    try:
+        try:
+            data = ollama_call(s, KIDS_VISION_PROMPT, temperature=0.1, model=model, images=images, num_predict=256)
+            safe = truthy(data.get("safe"))
+            reason = str(data.get("reason", ""))
+        except (requests.exceptions.HTTPError, ValueError):
+            text = ollama_call(s, VISION_TEXT_PROMPT, temperature=0.1, model=model, images=images, num_predict=128, as_json=False)
+            low = text.lower()
+            safe = "unsafe" not in low
+            reason = text.strip()[:200]
+    except Cancelled:
+        raise
+    except Exception as e:
+        raise VisionUnavailable(f"vision model '{model}' could not run: {e}") from e
+    if not safe:
+        raise ValueError(f"Vision check rejected {clip_path.name}: {reason or 'no reason given'}")
     logger.info("Vision check passed for %s", clip_path.name)
 
 
-def generate_clip(client, s, prompt, path):
+def load_pipeline(s):
+    with pipe_lock:
+        model = s["sd_model"].strip()
+        if pipeline["id"] == model and pipeline["obj"] is not None:
+            return pipeline["obj"]
+        try:
+            import torch
+            from diffusers import AutoPipelineForText2Image
+        except ImportError:
+            raise RuntimeError("Local engine needs extra packages. Run ./install-local.sh")
+        if torch.backends.mps.is_available():
+            device, dtype = "mps", torch.float16
+        elif torch.cuda.is_available():
+            device, dtype = "cuda", torch.float16
+        else:
+            device, dtype = "cpu", torch.float32
+        logger.info("Loading image model %s on %s (first run downloads several GB)", model, device)
+        pipe = AutoPipelineForText2Image.from_pretrained(model, torch_dtype=dtype, variant="fp16" if dtype == torch.float16 else None)
+        pipe = pipe.to(device)
+        pipe.set_progress_bar_config(disable=True)
+        pipeline["id"] = model
+        pipeline["obj"] = pipe
+        logger.info("Image model ready")
+        return pipe
+
+
+def generate_image(s, prompt, path):
+    pipe = load_pipeline(s)
+    kwargs = {
+        "prompt": prompt[:900],
+        "num_inference_steps": max(1, int(s["sd_steps"])),
+        "guidance_scale": float(s["sd_guidance"]),
+        "width": int(s["sd_width"]),
+        "height": int(s["sd_height"]),
+    }
+    if kwargs["guidance_scale"] > 0:
+        kwargs["negative_prompt"] = IMAGE_NEGATIVE
+    started = datetime.now()
+    image = pipe(**kwargs).images[0]
+    image.save(str(path))
+    logger.info("Generated %s in %.1fs", path.name, (datetime.now() - started).total_seconds())
+
+
+def tts_speak(s, text, out_wav):
+    engine = s["tts_engine"] if s["tts_engine"] in TTS_ENGINES else "auto"
+    if engine == "auto":
+        engine = "say" if sys.platform == "darwin" else ("piper" if s["piper_model"].strip() else "espeak")
+    text = text.strip() or "..."
+    if engine == "say":
+        aiff = out_wav.with_suffix(".aiff")
+        cmd = ["say", "-r", str(int(s["tts_rate"])), "-o", str(aiff)]
+        if s["tts_voice"].strip():
+            cmd += ["-v", s["tts_voice"].strip()]
+        cmd.append(text)
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"say failed: {r.stderr.strip()[:200]}")
+        conv = subprocess.run(["ffmpeg", "-y", "-i", str(aiff), "-ar", "44100", "-ac", "2", str(out_wav)], capture_output=True, text=True)
+        aiff.unlink(missing_ok=True)
+        if conv.returncode != 0:
+            raise RuntimeError("Could not convert narration audio")
+    elif engine == "espeak":
+        voice = s["tts_voice"].strip() or "en-us"
+        r = subprocess.run(["espeak-ng", "-v", voice, "-s", str(int(s["tts_rate"])), "-w", str(out_wav), text], capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"espeak-ng failed: {r.stderr.strip()[:200]}")
+    else:
+        model = s["piper_model"].strip()
+        if not model:
+            raise RuntimeError("Piper needs a voice model path in Settings")
+        r = subprocess.run(["piper", "--model", model, "--output_file", str(out_wav)], input=text, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"piper failed: {r.stderr.strip()[:200]}")
+    if not out_wav.exists() or out_wav.stat().st_size < 1000:
+        raise RuntimeError("Narration audio was empty")
+
+
+def media_duration(path):
+    r = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+        capture_output=True, text=True,
+    )
+    try:
+        return float(r.stdout.strip())
+    except ValueError:
+        return 0.0
+
+
+def render_scene(s, image, audio, out, aspect):
+    w, h = (1080, 1920) if aspect == "9:16" else (1920, 1080)
+    dur = max(float(s["clip_seconds"]), media_duration(audio) + 0.6)
+    frames = int(dur * 30)
+    vf = (
+        f"[0:v]scale={w * 2}:{h * 2}:force_original_aspect_ratio=increase,crop={w * 2}:{h * 2},"
+        f"zoompan=z='min(zoom+0.0004,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s={w}x{h}:fps=30,"
+        f"format=yuv420p[v];[1:a]apad,atrim=0:{dur:.2f},asetpts=N/SR/TB[a]"
+    )
+    cmd = [
+        "ffmpeg", "-y", "-loop", "1", "-i", str(image), "-i", str(audio),
+        "-filter_complex", vf, "-map", "[v]", "-map", "[a]",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "20",
+        "-c:a", "aac", "-b:a", "160k", "-t", f"{dur:.2f}", str(out),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        logger.error("ffmpeg output:\n%s", r.stderr[-3000:])
+        raise RuntimeError("Could not render scene video")
+    logger.info("Rendered %s (%.1fs)", out.name, dur)
+
+
+def make_clip_local(s, scene, script, path, kids):
+    image = path.with_suffix(".png")
+    audio = path.with_suffix(".wav")
+    style = script["style"].strip()
+    prompt = f"{scene['visual']} {style}{KIDS_IMAGE_SUFFIX if kids else ''}"
+    logger.debug("Image prompt: %s", prompt)
+    generate_image(s, prompt, image)
+    tts_speak(s, scene["narration"], audio)
+    render_scene(s, image, audio, path, s["aspect_ratio"])
+    if not s["keep_clips"]:
+        audio.unlink(missing_ok=True)
+    return image
+
+
+def make_clip_veo(s, scene, script, path, kids):
+    from google import genai
+    from google.genai import types
+    client = genai.Client(api_key=s["gemini_api_key"])
+    orientation = "Vertical" if s["aspect_ratio"] == "9:16" else "Widescreen"
+    prompt = (
+        f"{scene['visual']} Style: {script['style']}. {orientation} short-form video. "
+        f"A narrator's voiceover says: \"{scene['narration']}\" "
+        f"No on-screen text, captions, or subtitles.{KIDS_VEO_SUFFIX if kids else ''}"
+    )
     logger.debug("Veo prompt: %s", prompt)
     op = client.models.generate_videos(
         model=s["veo_model"],
@@ -775,6 +1068,7 @@ def generate_clip(client, s, prompt, path):
     client.files.download(file=v.video)
     v.video.save(str(path))
     logger.info("Saved clip %s", path.name)
+    return None
 
 
 def concat_clips(clips, out, aspect):
@@ -840,7 +1134,8 @@ def upload_video(s, path, script, tags):
 
 
 def run_job(s):
-    if not s["gemini_api_key"]:
+    engine = s["video_engine"] if s["video_engine"] in ENGINES else "local"
+    if engine == "veo" and not s["gemini_api_key"]:
         raise RuntimeError("Gemini API key is not set in Settings")
     if not shutil.which("ffmpeg"):
         raise RuntimeError("ffmpeg was not found on PATH")
@@ -848,7 +1143,8 @@ def run_job(s):
     if kids and not s["vision_model"].strip():
         raise RuntimeError("Made for kids requires a vision model in Settings (e.g. llama3.2-vision)")
     prepare_storage(s)
-    logger.info("Profile: %s | Niche: %s | Made for kids: %s | Upload category: %s", s["name"], s["channel_niche"] or "none", kids, s["upload_category_id"])
+    ensure_models(s, engine)
+    logger.info("Profile: %s | Engine: %s | Niche: %s | Made for kids: %s | Upload category: %s", s["name"], engine, s["channel_niche"] or "none", kids, s["upload_category_id"])
     if kids:
         logger.info(
             "Kids compliance active: script rules, word filters, LLM review (%s), frame vision checks, made-for-kids flag%s",
@@ -892,41 +1188,56 @@ def run_job(s):
     finalized = False
     try:
         script, tags, compliance = produce_script(s, src)
+        compliance["engine"] = engine
         update_history(job_id, title=script["title"], notes="; ".join(compliance.get("reviewer_notes", []))[:400])
         write_json(job_dir / "script.json", {"profile": s["name"], "source": src, "script": script, "tags": tags})
-        client = genai.Client(api_key=s["gemini_api_key"])
-        orientation = "Vertical" if s["aspect_ratio"] == "9:16" else "Widescreen"
-        suffix = KIDS_VEO_SUFFIX if kids else ""
         clips = []
+        extras = []
         vision_log = []
         n = len(script["scenes"])
         for i, scene in enumerate(script["scenes"], 1):
             check()
-            set_stage(f"generating clip {i}/{n}")
+            set_stage(f"generating scene {i}/{n}")
             path = job_dir / f"clip_{i:02d}.mp4"
-            prompt = (
-                f"{scene['visual']} Style: {script['style']}. {orientation} short-form video. "
-                f"A narrator's voiceover says: \"{scene['narration']}\" "
-                f"No on-screen text, captions, or subtitles.{suffix}"
-            )
             for attempt in range(1, 4):
                 try:
-                    generate_clip(client, s, prompt, path)
-                    if kids:
-                        set_stage(f"vision check clip {i}/{n}")
-                        kids_vision_check(s, path)
-                        vision_log.append({"clip": i, "attempt": attempt, "result": "passed"})
-                    break
+                    if engine == "local":
+                        extra = make_clip_local(s, scene, script, path, kids)
+                    else:
+                        extra = make_clip_veo(s, scene, script, path, kids)
                 except Cancelled:
                     raise
                 except Exception as e:
-                    logger.warning("Clip %d attempt %d failed: %s", i, attempt, e)
-                    if kids:
-                        vision_log.append({"clip": i, "attempt": attempt, "result": str(e)[:300]})
+                    logger.warning("Scene %d attempt %d failed: %s", i, attempt, e)
                     path.unlink(missing_ok=True)
                     if attempt == 3:
                         raise
-                    stop_event.wait(20)
+                    stop_event.wait(10)
+                    continue
+                if kids:
+                    set_stage(f"vision check scene {i}/{n}")
+                    try:
+                        kids_vision_check(s, path)
+                        vision_log.append({"clip": i, "attempt": attempt, "result": "passed"})
+                    except Cancelled:
+                        raise
+                    except VisionUnavailable as e:
+                        if s["kids_manual_review"]:
+                            logger.warning("Scene %d: %s. Continuing, check this video manually before publishing", i, e)
+                            vision_log.append({"clip": i, "attempt": attempt, "result": f"skipped: {e}"[:300]})
+                        else:
+                            raise RuntimeError(f"{e}. Turn on manual review or pick a working vision model")
+                    except Exception as e:
+                        logger.warning("Scene %d attempt %d rejected: %s", i, attempt, e)
+                        vision_log.append({"clip": i, "attempt": attempt, "result": str(e)[:300]})
+                        path.unlink(missing_ok=True)
+                        if attempt == 3:
+                            raise
+                        stop_event.wait(5)
+                        continue
+                if extra:
+                    extras.append(extra)
+                break
             clips.append(path)
         if kids:
             compliance["vision_checks"] = vision_log
@@ -949,7 +1260,7 @@ def run_job(s):
         write_json(job_dir / "compliance.json", compliance)
         finalized = True
         if not s["keep_clips"]:
-            for c in clips:
+            for c in clips + extras:
                 c.unlink(missing_ok=True)
         set_stage("moving files")
         location = finish_files(s, job_dir, job_id)
@@ -1019,6 +1330,7 @@ def api_status():
         "running": bool(runner and runner.is_alive()),
         "stage": status["stage"],
         "profile": s["name"],
+        "engine": s["video_engine"],
         "made_for_kids": s["made_for_kids"],
         "published_today": published_today(s["profile_id"]),
         "videos_per_day": s["videos_per_day"],
@@ -1041,6 +1353,11 @@ def get_settings():
         "active": g["active_profile"],
         "profiles": list_profiles(),
         "storage_resolved": str(resolve_storage(g["storage_dir"])),
+        "models_resolved": str(resolve_sub(g, "models_dir", "models")),
+        "temp_resolved": str(resolve_sub(g, "temp_dir", "tmp")),
+        "installed_models": ollama_tags(g),
+        "suggested_text_models": SUGGESTED_TEXT_MODELS,
+        "suggested_vision_models": SUGGESTED_VISION_MODELS,
     }
 
 
@@ -1061,10 +1378,16 @@ async def post_settings(request: Request):
                 if k in PROFILE_DEFAULTS:
                     p[k] = coerce(PROFILE_DEFAULTS, k, v)
             g["storage_dir"] = g["storage_dir"].strip().strip('"') or "videos"
+            if g["video_engine"] not in ENGINES:
+                g["video_engine"] = "local"
+            if g["tts_engine"] not in TTS_ENGINES:
+                g["tts_engine"] = "auto"
             p["source_language"] = p["source_language"].lower()[:5]
             if p["kids_llm_review"] not in REVIEW_MODES:
                 p["kids_llm_review"] = "advisory"
             root = validate_storage(g["storage_dir"])
+            writable(resolve_sub(g, "models_dir", "models"))
+            writable(resolve_sub(g, "temp_dir", "tmp"))
         except (TypeError, ValueError) as e:
             return JSONResponse({"detail": str(e)}, status_code=400)
         if not p["name"]:
@@ -1147,6 +1470,20 @@ def api_stop():
     if runner and runner.is_alive():
         set_stage("stopping")
     return {"ok": True}
+
+
+@app.post("/api/models/pull")
+async def api_pull_model(request: Request):
+    model = str((await request.json()).get("model", "")).strip()
+    if not model:
+        return JSONResponse({"detail": "No model name given"}, status_code=400)
+    g = load_global()
+    try:
+        pulled = ollama_pull(g, model)
+    except Exception as e:
+        logger.exception("Model pull failed")
+        return JSONResponse({"detail": str(e)}, status_code=400)
+    return {"ok": True, "pulled": pulled, "models": ollama_tags(g)}
 
 
 @app.get("/api/trending")
