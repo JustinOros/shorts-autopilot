@@ -66,8 +66,8 @@ GLOBAL_DEFAULTS = {
     "sd_model": "stabilityai/sdxl-turbo",
     "sd_steps": 4,
     "sd_guidance": 0,
-    "sd_width": 512,
-    "sd_height": 896,
+    "sd_width": 768,
+    "sd_height": 1344,
     "tts_engine": "auto",
     "tts_voice": "Samantha",
     "tts_rate": 170,
@@ -131,9 +131,10 @@ IMAGE_NEGATIVE = (
     "scary, creepy, horror, violence, weapon, blood, gore, deformed, distorted, extra limbs, ugly, blurry, low quality, nsfw"
 )
 
-KIDS_VISION_PROMPT = """This is a still frame from a short video intended for young children.
-Mark it unsafe if the image shows: realistic humans or children, violence, weapons, blood, injury, scary, creepy, or disturbing imagery, distorted or malformed faces or bodies, nudity or suggestive content, alcohol, tobacco, drugs, brand logos, readable text, or anything a parent would find inappropriate for a 4 year old.
-Return JSON only: {"safe": true or false, "reason": "short explanation"}"""
+KIDS_VISION_PROMPT = """Look carefully at this image from a video for young children.
+First describe what you actually see in the image.
+Then decide: it is unsafe if it shows realistic humans or children, violence, weapons, blood, injury, scary or creepy imagery, badly deformed or duplicated faces or bodies, nudity, alcohol, tobacco, drugs, brand logos, or anything a parent would find inappropriate for a 4 year old.
+Reply with JSON only, filling in your own words: {"description": "what you see", "safe": true or false, "reason": "why"}"""
 
 VISION_TEXT_PROMPT = """Look at this image, which is meant for young children.
 Answer with one word, safe or unsafe, then a short reason.
@@ -277,6 +278,28 @@ def free_gb(path):
         return shutil.disk_usage(path).free / 1e9
     except OSError:
         return None
+
+
+def voices_dir(s):
+    return resolve_sub(s, "models_dir", "models") / "voices"
+
+
+def find_piper_voice(s):
+    configured = s["piper_model"].strip()
+    if configured and Path(configured).expanduser().exists():
+        return str(Path(configured).expanduser())
+    vdir = voices_dir(s)
+    if vdir.exists():
+        for f in sorted(vdir.glob("*.onnx")):
+            return str(f)
+    return ""
+
+
+def piper_binary():
+    for cand in (BASE / ".venv" / "bin" / "piper", Path("/opt/homebrew/bin/piper")):
+        if cand.exists():
+            return str(cand)
+    return shutil.which("piper") or ""
 
 
 def apply_paths(s):
@@ -649,14 +672,16 @@ Identify the underlying topic and why it appeals to viewers. Then write a comple
 Do not reuse the source's title, script, characters, jokes, branding, or channel identity.
 Do not depict real people, celebrities, brands, logos, or copyrighted characters. Invent new characters.
 
+First invent the cast. "characters" is one sentence naming each character with fixed, concrete visual details (species, color, size, clothing, one distinctive feature) that never change.
+
 The Short has exactly {n} scenes of {clip} seconds each. Each scene has:
-"visual": a detailed, self-contained shot description of one still image (subject, setting, action, mood, lighting). Repeat key character and setting details in every scene so they stay consistent. Never mention on-screen text or words.
+"visual": a detailed, self-contained shot description of one still image (setting, action, mood, lighting). Name the characters but do not re-describe their appearance, that comes from "characters". Never mention on-screen text or words.
 "narration": one spoken line of at most {words} words.
 
 Scene 1 must hook the viewer in the first 2 seconds. The final scene must deliver a payoff.
 
 Return JSON only in this shape:
-{{"title": "under 70 characters", "style": "one sentence visual style applied to every scene", "description": "2 to 3 sentence YouTube description", "scenes": [{{"visual": "...", "narration": "..."}}]}}"""
+{{"title": "under 70 characters", "characters": "one sentence describing every character's fixed appearance", "style": "one sentence visual style applied to every scene", "description": "2 to 3 sentence YouTube description", "scenes": [{{"visual": "...", "narration": "..."}}]}}"""
     last = None
     for attempt in range(1, 4):
         check()
@@ -673,6 +698,7 @@ Return JSON only in this shape:
             data["scenes"] = [{"visual": str(sc.get("visual", "")), "narration": str(sc.get("narration", ""))} for sc in scenes[:n]]
             data["title"] = str(data["title"])
             data["style"] = str(data.get("style", ""))
+            data["characters"] = str(data.get("characters", ""))
             data["description"] = str(data.get("description", ""))
             logger.info("Script ready: '%s' (%d scenes)", data["title"], n)
             return data
@@ -736,7 +762,7 @@ def normalize_text(t):
 
 
 def script_text(script):
-    parts = [script["title"], script["description"], script["style"]]
+    parts = [script["title"], script["description"], script["style"], script.get("characters", "")]
     for sc in script["scenes"]:
         parts += [sc["visual"], sc["narration"]]
     return " ".join(parts)
@@ -744,7 +770,7 @@ def script_text(script):
 
 def kids_rule_issues(script):
     issues = []
-    texts = [script["title"], script["description"], script["style"]]
+    texts = [script["title"], script["description"], script["style"], script.get("characters", "")]
     texts += [f"{sc['visual']} {sc['narration']}" for sc in script["scenes"]]
     for t in texts:
         for m in KIDS_BANNED.finditer(t):
@@ -942,8 +968,8 @@ def generate_image(s, prompt, path):
         "prompt": prompt[:900],
         "num_inference_steps": max(1, int(s["sd_steps"])),
         "guidance_scale": float(s["sd_guidance"]),
-        "width": int(s["sd_width"]),
-        "height": int(s["sd_height"]),
+        "width": max(512, int(s["sd_width"]) // 64 * 64),
+        "height": max(512, int(s["sd_height"]) // 64 * 64),
     }
     if kwargs["guidance_scale"] > 0:
         kwargs["negative_prompt"] = IMAGE_NEGATIVE
@@ -955,34 +981,45 @@ def generate_image(s, prompt, path):
 
 def tts_speak(s, text, out_wav):
     engine = s["tts_engine"] if s["tts_engine"] in TTS_ENGINES else "auto"
+    voice = find_piper_voice(s)
+    binary = piper_binary()
     if engine == "auto":
-        engine = "say" if sys.platform == "darwin" else ("piper" if s["piper_model"].strip() else "espeak")
+        if voice and binary:
+            engine = "piper"
+        elif sys.platform == "darwin":
+            engine = "say"
+        else:
+            engine = "espeak"
     text = text.strip() or "..."
-    if engine == "say":
+    if engine == "piper":
+        if not voice:
+            raise RuntimeError("Piper needs a voice file. Run ./install-local.sh or set the path in Settings")
+        if not binary:
+            raise RuntimeError("Piper is not installed. Run ./install-local.sh")
+        r = subprocess.run([binary, "--model", voice, "--output_file", str(out_wav)], input=text, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise RuntimeError(f"piper failed: {r.stderr.strip()[:200]}")
+    elif engine == "say":
         aiff = out_wav.with_suffix(".aiff")
         cmd = ["say", "-r", str(int(s["tts_rate"])), "-o", str(aiff)]
         if s["tts_voice"].strip():
             cmd += ["-v", s["tts_voice"].strip()]
         cmd.append(text)
         r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0 and s["tts_voice"].strip():
+            logger.warning("Voice '%s' is not installed, using the system default", s["tts_voice"].strip())
+            r = subprocess.run(["say", "-r", str(int(s["tts_rate"])), "-o", str(aiff), text], capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(f"say failed: {r.stderr.strip()[:200]}")
         conv = subprocess.run(["ffmpeg", "-y", "-i", str(aiff), "-ar", "44100", "-ac", "2", str(out_wav)], capture_output=True, text=True)
         aiff.unlink(missing_ok=True)
         if conv.returncode != 0:
             raise RuntimeError("Could not convert narration audio")
-    elif engine == "espeak":
-        voice = s["tts_voice"].strip() or "en-us"
-        r = subprocess.run(["espeak-ng", "-v", voice, "-s", str(int(s["tts_rate"])), "-w", str(out_wav), text], capture_output=True, text=True)
+    else:
+        v = s["tts_voice"].strip() or "en-us"
+        r = subprocess.run(["espeak-ng", "-v", v, "-s", str(int(s["tts_rate"])), "-w", str(out_wav), text], capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(f"espeak-ng failed: {r.stderr.strip()[:200]}")
-    else:
-        model = s["piper_model"].strip()
-        if not model:
-            raise RuntimeError("Piper needs a voice model path in Settings")
-        r = subprocess.run(["piper", "--model", model, "--output_file", str(out_wav)], input=text, capture_output=True, text=True)
-        if r.returncode != 0:
-            raise RuntimeError(f"piper failed: {r.stderr.strip()[:200]}")
     if not out_wav.exists() or out_wav.stat().st_size < 1000:
         raise RuntimeError("Narration audio was empty")
 
@@ -1024,7 +1061,9 @@ def make_clip_local(s, scene, script, path, kids):
     image = path.with_suffix(".png")
     audio = path.with_suffix(".wav")
     style = script["style"].strip()
-    prompt = f"{scene['visual']} {style}{KIDS_IMAGE_SUFFIX if kids else ''}"
+    cast = script.get("characters", "").strip()
+    cast_part = f" Characters: {cast}" if cast else ""
+    prompt = f"{scene['visual']}{cast_part} {style}{KIDS_IMAGE_SUFFIX if kids else ''}"
     logger.debug("Image prompt: %s", prompt)
     generate_image(s, prompt, image)
     tts_speak(s, scene["narration"], audio)
@@ -1144,6 +1183,8 @@ def run_job(s):
         raise RuntimeError("Made for kids requires a vision model in Settings (e.g. llama3.2-vision)")
     prepare_storage(s)
     ensure_models(s, engine)
+    if engine == "local":
+        logger.info("Narration: %s | Image: %s at %sx%s", "piper" if find_piper_voice(s) and piper_binary() else s["tts_engine"], s["sd_model"], s["sd_width"], s["sd_height"])
     logger.info("Profile: %s | Engine: %s | Niche: %s | Made for kids: %s | Upload category: %s", s["name"], engine, s["channel_niche"] or "none", kids, s["upload_category_id"])
     if kids:
         logger.info(
@@ -1484,6 +1525,16 @@ async def api_pull_model(request: Request):
         logger.exception("Model pull failed")
         return JSONResponse({"detail": str(e)}, status_code=400)
     return {"ok": True, "pulled": pulled, "models": ollama_tags(g)}
+
+
+@app.post("/api/history/clear")
+def api_clear_history():
+    with state_lock:
+        st = load_state()
+        st["history"] = []
+        save_state(st)
+    logger.info("Cleared the job history")
+    return {"ok": True}
 
 
 @app.get("/api/trending")
