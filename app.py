@@ -390,22 +390,48 @@ def piper_binary():
     return shutil.which("piper") or ""
 
 
+KOKORO_FILES = {
+    "kokoro-v1.0.onnx": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx",
+    "voices-v1.0.bin": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin",
+}
+
+
+def kokoro_assets(s):
+    vdir = voices_dir(s)
+    vdir.mkdir(parents=True, exist_ok=True)
+    paths = {}
+    for name, url in KOKORO_FILES.items():
+        dest = vdir / name
+        if not dest.exists() or dest.stat().st_size < 1_000_000:
+            set_stage(f"downloading narration model {name}")
+            logger.info("Downloading %s", name)
+            tmp = dest.with_suffix(dest.suffix + ".part")
+            with requests.get(url, stream=True, timeout=(10, 1200)) as r:
+                r.raise_for_status()
+                with open(tmp, "wb") as fh:
+                    for chunk in r.iter_content(chunk_size=1 << 20):
+                        check()
+                        fh.write(chunk)
+            os.replace(tmp, dest)
+            logger.info("Downloaded %s", name)
+        paths[name] = str(dest)
+    return paths
+
+
 def kokoro_speak(s, text, out_wav):
-    import numpy as np
     import soundfile as sf
-    from kokoro import KPipeline
+    from kokoro_onnx import Kokoro
     with pipe_lock:
         if kokoro["obj"] is None:
-            logger.info("Loading narration model (first run downloads about 350 MB)")
-            kokoro["obj"] = KPipeline(lang_code="a")
+            assets = kokoro_assets(s)
+            logger.info("Loading narration model")
+            kokoro["obj"] = Kokoro(assets["kokoro-v1.0.onnx"], assets["voices-v1.0.bin"])
             logger.info("Narration model ready")
     voice = s["tts_voice"].strip() or "af_heart"
     if not re.fullmatch(r"[a-z]{2}_[a-z_]+", voice):
         voice = "af_heart"
-    chunks = [audio for _, _, audio in kokoro["obj"](text, voice=voice, speed=0.95)]
-    if not chunks:
-        raise RuntimeError("Narration model produced no audio")
-    sf.write(str(out_wav), np.concatenate(chunks), 24000)
+    samples, rate = kokoro["obj"].create(text, voice=voice, speed=0.95, lang="en-us")
+    sf.write(str(out_wav), samples, rate)
 
 
 def apply_paths(s):
@@ -597,15 +623,17 @@ def mostly_latin(text):
     if not letters:
         return False
     latin = sum(1 for c in letters if ord(c) < 0x250)
-    return latin / len(letters) >= 0.8
+    return latin / len(letters) >= 0.95
 
 
-def filter_language(videos, lang):
+def filter_language(videos, lang, strict=False):
     if not lang:
         return videos
     kept = []
     for v in videos:
         if v["language"] and not v["language"].startswith(lang):
+            continue
+        if strict and not v["language"]:
             continue
         if lang in LATIN_LANGS and not mostly_latin(v["title"]):
             continue
@@ -651,7 +679,11 @@ def fetch_trending(s):
             params["videoCategoryId"] = s["category_id"]
         items = yt.videos().list(**params).execute().get("items", [])
         logger.info("Fetched %d trending chart videos (region %s, category %s)", len(items), region, s["category_id"] or "all")
-    return filter_language(map_videos(items), lang)
+    kept = filter_language(map_videos(items), lang, strict=bool(s["made_for_kids"]))
+    if not kept and s["made_for_kids"]:
+        logger.info("No sources declared language '%s', falling back to title matching", lang)
+        kept = filter_language(map_videos(items), lang)
+    return kept
 
 
 def ollama_tags(s):
@@ -711,11 +743,14 @@ def ensure_local_deps(s):
     for module, package in (("accelerate", "accelerate"), ("safetensors", "safetensors"), ("transformers", "transformers")):
         ensure_module(s, module, package)
     want = s["tts_engine"] if s["tts_engine"] in TTS_ENGINES else "auto"
-    if want in ("auto", "kokoro") and not have_module("kokoro"):
-        if ensure_module(s, "kokoro", "kokoro") :
+    if want in ("auto", "kokoro") and not have_module("kokoro_onnx"):
+        if ensure_module(s, "kokoro_onnx", "kokoro-onnx"):
             ensure_module(s, "soundfile", "soundfile")
-        elif want == "kokoro":
-            logger.warning("Kokoro could not be installed, narration will fall back")
+        else:
+            logger.warning("Kokoro could not be installed, trying Piper instead")
+            if not piper_binary():
+                ensure_module(s, "piper", "piper-tts")
+            ensure_piper_voice(s)
     if want == "piper":
         if not piper_binary():
             ensure_module(s, "piper", "piper-tts")
@@ -1109,7 +1144,7 @@ def pick_tts(s):
     engine = s["tts_engine"] if s["tts_engine"] in TTS_ENGINES else "auto"
     if engine != "auto":
         return engine
-    if have_module("kokoro"):
+    if have_module("kokoro_onnx"):
         return "kokoro"
     if find_piper_voice(s) and piper_binary():
         return "piper"
