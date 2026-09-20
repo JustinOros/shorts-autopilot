@@ -46,7 +46,7 @@ MIN_FREE_GB = 2
 LATIN_LANGS = {"en", "es", "fr", "de", "it", "pt", "nl", "sv", "no", "da", "fi", "pl", "cs", "ro", "hu", "tr", "id", "ms", "vi", "tl"}
 REVIEW_MODES = ("advisory", "block", "off")
 ENGINES = ("local", "veo")
-TTS_ENGINES = ("auto", "say", "espeak", "piper")
+TTS_ENGINES = ("auto", "kokoro", "piper", "say", "espeak")
 SUGGESTED_TEXT_MODELS = ["llama3.1:8b", "llama3.2:3b", "qwen2.5:7b", "mistral:7b"]
 SUGGESTED_VISION_MODELS = ["moondream", "llava:7b", "llama3.2-vision", "qwen2.5vl:7b"]
 SMALL_VISION_MODELS = ("moondream", "llava-phi3", "bakllava")
@@ -69,9 +69,10 @@ GLOBAL_DEFAULTS = {
     "sd_width": 768,
     "sd_height": 1344,
     "tts_engine": "auto",
-    "tts_voice": "Samantha",
+    "tts_voice": "af_heart",
     "tts_rate": 170,
     "piper_model": "",
+    "auto_install": True,
     "gemini_api_key": "",
     "veo_model": "veo-3.1-fast-generate-preview",
     "aspect_ratio": "9:16",
@@ -182,6 +183,7 @@ state_lock = threading.RLock()
 settings_lock = threading.RLock()
 pipe_lock = threading.Lock()
 pipeline = {"id": None, "obj": None}
+kokoro = {"obj": None}
 stop_event = threading.Event()
 runner = None
 pending_flow = None
@@ -280,6 +282,40 @@ def free_gb(path):
         return None
 
 
+def venv_python():
+    cand = BASE / ".venv" / "bin" / "python"
+    return str(cand) if cand.exists() else sys.executable
+
+
+def pip_install(*args):
+    cmd = [venv_python(), "-m", "pip", "install", *args]
+    logger.info("Installing %s (this can take a few minutes)", " ".join(args))
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        logger.warning("Install failed: %s", (r.stderr or r.stdout).strip()[-500:])
+        return False
+    logger.info("Installed %s", " ".join(args))
+    return True
+
+
+def have_module(name):
+    try:
+        __import__(name)
+        return True
+    except Exception:
+        return False
+
+
+def ensure_module(s, module, package):
+    if have_module(module):
+        return True
+    if not s.get("auto_install", True):
+        logger.warning("%s is missing and auto install is off", package)
+        return False
+    set_stage(f"installing {package}")
+    return pip_install(package) and have_module(module)
+
+
 def voices_dir(s):
     return resolve_sub(s, "models_dir", "models") / "voices"
 
@@ -295,11 +331,60 @@ def find_piper_voice(s):
     return ""
 
 
+def ensure_piper_voice(s):
+    voice = find_piper_voice(s)
+    if voice:
+        return voice
+    if not s.get("auto_install", True):
+        return ""
+    vdir = voices_dir(s)
+    vdir.mkdir(parents=True, exist_ok=True)
+    base = "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium"
+    set_stage("downloading narration voice")
+    try:
+        for suffix in (".onnx", ".onnx.json"):
+            dest = vdir / f"en_US-lessac-medium{suffix}"
+            if dest.exists():
+                continue
+            logger.info("Downloading narration voice%s", suffix)
+            with requests.get(base + suffix, stream=True, timeout=(10, 600)) as r:
+                r.raise_for_status()
+                with open(dest, "wb") as fh:
+                    for chunk in r.iter_content(chunk_size=1 << 20):
+                        check()
+                        fh.write(chunk)
+        logger.info("Narration voice ready")
+    except Cancelled:
+        raise
+    except Exception as e:
+        logger.warning("Could not download the Piper voice: %s", e)
+        return ""
+    return find_piper_voice(s)
+
+
 def piper_binary():
     for cand in (BASE / ".venv" / "bin" / "piper", Path("/opt/homebrew/bin/piper")):
         if cand.exists():
             return str(cand)
     return shutil.which("piper") or ""
+
+
+def kokoro_speak(s, text, out_wav):
+    import numpy as np
+    import soundfile as sf
+    from kokoro import KPipeline
+    with pipe_lock:
+        if kokoro["obj"] is None:
+            logger.info("Loading narration model (first run downloads about 350 MB)")
+            kokoro["obj"] = KPipeline(lang_code="a")
+            logger.info("Narration model ready")
+    voice = s["tts_voice"].strip() or "af_heart"
+    if not re.fullmatch(r"[a-z]{2}_[a-z_]+", voice):
+        voice = "af_heart"
+    chunks = [audio for _, _, audio in kokoro["obj"](text, voice=voice, speed=0.95)]
+    if not chunks:
+        raise RuntimeError("Narration model produced no audio")
+    sf.write(str(out_wav), np.concatenate(chunks), 24000)
 
 
 def apply_paths(s):
@@ -597,6 +682,24 @@ def ollama_pull(s, model):
                 last = st
     logger.info("Model '%s' is ready", model)
     return True
+
+
+def ensure_local_deps(s):
+    if not ensure_module(s, "torch", "torch") or not ensure_module(s, "diffusers", "diffusers accelerate safetensors transformers".split()[0]):
+        raise RuntimeError("Could not install the image packages. Run ./install-local.sh")
+    for module, package in (("accelerate", "accelerate"), ("safetensors", "safetensors"), ("transformers", "transformers")):
+        ensure_module(s, module, package)
+    want = s["tts_engine"] if s["tts_engine"] in TTS_ENGINES else "auto"
+    if want in ("auto", "kokoro") and not have_module("kokoro"):
+        if ensure_module(s, "kokoro", "kokoro") :
+            ensure_module(s, "soundfile", "soundfile")
+        elif want == "kokoro":
+            logger.warning("Kokoro could not be installed, narration will fall back")
+    if want == "piper":
+        if not piper_binary():
+            ensure_module(s, "piper", "piper-tts")
+        ensure_piper_voice(s)
+    logger.info("Narration engine: %s", pick_tts(s))
 
 
 def ensure_models(s, engine):
@@ -945,7 +1048,7 @@ def load_pipeline(s):
             import torch
             from diffusers import AutoPipelineForText2Image
         except ImportError:
-            raise RuntimeError("Local engine needs extra packages. Run ./install-local.sh")
+            raise RuntimeError("Image packages are missing. Turn on auto install in Settings or run ./install-local.sh")
         if torch.backends.mps.is_available():
             device, dtype = "mps", torch.float16
         elif torch.cuda.is_available():
@@ -979,36 +1082,22 @@ def generate_image(s, prompt, path):
     logger.info("Generated %s in %.1fs", path.name, (datetime.now() - started).total_seconds())
 
 
-def tts_speak(s, text, out_wav):
+def pick_tts(s):
     engine = s["tts_engine"] if s["tts_engine"] in TTS_ENGINES else "auto"
-    voice = find_piper_voice(s)
-    binary = piper_binary()
-    if engine == "auto":
-        if voice and binary:
-            engine = "piper"
-        elif sys.platform == "darwin":
-            engine = "say"
-        else:
-            engine = "espeak"
-    text = text.strip() or "..."
-    if engine == "piper":
-        if not voice:
-            raise RuntimeError("Piper needs a voice file. Run ./install-local.sh or set the path in Settings")
-        if not binary:
-            raise RuntimeError("Piper is not installed. Run ./install-local.sh")
-        r = subprocess.run([binary, "--model", voice, "--output_file", str(out_wav)], input=text, capture_output=True, text=True)
-        if r.returncode != 0:
-            raise RuntimeError(f"piper failed: {r.stderr.strip()[:200]}")
-    elif engine == "say":
+    if engine != "auto":
+        return engine
+    if have_module("kokoro"):
+        return "kokoro"
+    if find_piper_voice(s) and piper_binary():
+        return "piper"
+    return "say" if sys.platform == "darwin" else "espeak"
+
+
+def system_speak(s, text, out_wav):
+    if sys.platform == "darwin":
         aiff = out_wav.with_suffix(".aiff")
-        cmd = ["say", "-r", str(int(s["tts_rate"])), "-o", str(aiff)]
-        if s["tts_voice"].strip():
-            cmd += ["-v", s["tts_voice"].strip()]
-        cmd.append(text)
+        cmd = ["say", "-r", str(int(s["tts_rate"])), "-o", str(aiff), text]
         r = subprocess.run(cmd, capture_output=True, text=True)
-        if r.returncode != 0 and s["tts_voice"].strip():
-            logger.warning("Voice '%s' is not installed, using the system default", s["tts_voice"].strip())
-            r = subprocess.run(["say", "-r", str(int(s["tts_rate"])), "-o", str(aiff), text], capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(f"say failed: {r.stderr.strip()[:200]}")
         conv = subprocess.run(["ffmpeg", "-y", "-i", str(aiff), "-ar", "44100", "-ac", "2", str(out_wav)], capture_output=True, text=True)
@@ -1016,10 +1105,35 @@ def tts_speak(s, text, out_wav):
         if conv.returncode != 0:
             raise RuntimeError("Could not convert narration audio")
     else:
-        v = s["tts_voice"].strip() or "en-us"
-        r = subprocess.run(["espeak-ng", "-v", v, "-s", str(int(s["tts_rate"])), "-w", str(out_wav), text], capture_output=True, text=True)
+        r = subprocess.run(["espeak-ng", "-v", "en-us", "-s", str(int(s["tts_rate"])), "-w", str(out_wav), text], capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(f"espeak-ng failed: {r.stderr.strip()[:200]}")
+
+
+def tts_speak(s, text, out_wav):
+    text = text.strip() or "..."
+    engine = pick_tts(s)
+    try:
+        if engine == "kokoro":
+            kokoro_speak(s, text, out_wav)
+        elif engine == "piper":
+            voice = ensure_piper_voice(s)
+            binary = piper_binary()
+            if not voice or not binary:
+                raise RuntimeError("Piper is not available")
+            r = subprocess.run([binary, "--model", voice, "--output_file", str(out_wav)], input=text, capture_output=True, text=True)
+            if r.returncode != 0:
+                raise RuntimeError(f"piper failed: {r.stderr.strip()[:200]}")
+        else:
+            system_speak(s, text, out_wav)
+    except Cancelled:
+        raise
+    except Exception as e:
+        if engine in ("kokoro", "piper"):
+            logger.warning("%s narration failed (%s), using the system voice for this scene", engine, e)
+            system_speak(s, text, out_wav)
+        else:
+            raise
     if not out_wav.exists() or out_wav.stat().st_size < 1000:
         raise RuntimeError("Narration audio was empty")
 
@@ -1184,7 +1298,9 @@ def run_job(s):
     prepare_storage(s)
     ensure_models(s, engine)
     if engine == "local":
-        logger.info("Narration: %s | Image: %s at %sx%s", "piper" if find_piper_voice(s) and piper_binary() else s["tts_engine"], s["sd_model"], s["sd_width"], s["sd_height"])
+        ensure_local_deps(s)
+    if engine == "local":
+        logger.info("Image model: %s at %sx%s", s["sd_model"], s["sd_width"], s["sd_height"])
     logger.info("Profile: %s | Engine: %s | Niche: %s | Made for kids: %s | Upload category: %s", s["name"], engine, s["channel_niche"] or "none", kids, s["upload_category_id"])
     if kids:
         logger.info(
