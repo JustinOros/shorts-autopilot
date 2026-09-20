@@ -131,7 +131,7 @@ const FIELDS=[
 ["video_engine","Video engine","select:local=Local (free: AI images, narration, motion)|veo=Veo (paid Google API)","Local runs entirely on this machine at no cost. Veo makes true AI video but needs billing","g"],
 ["sd_model","Image model","text","Hugging Face model id, e.g. stabilityai/sdxl-turbo or stabilityai/stable-diffusion-xl-base-1.0","g"],
 ["sd_steps","Image steps","number","4 for turbo models, 20 to 30 for standard models","g"],
-["sd_guidance","Image guidance","number","0 for turbo models, 7 for standard models","g"],
+["sd_guidance","Image guidance","number","2 for turbo models, 7 for standard models. Below 1.1 the anatomy filter stops working","g"],
 ["sd_width","Image width","number","768 avoids duplicated subjects. Larger is slower","g"],
 ["sd_height","Image height","number","1344 is the correct vertical ratio for SDXL","g"],
 ["tts_engine","Narration engine","select:auto=Auto (best available)|kokoro=Kokoro (most natural)|piper=Piper|say=macOS say|espeak=espeak-ng","Missing engines are installed automatically on the next run","g"],

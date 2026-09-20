@@ -65,7 +65,7 @@ GLOBAL_DEFAULTS = {
     "ollama_timeout": 300,
     "sd_model": "stabilityai/sdxl-turbo",
     "sd_steps": 4,
-    "sd_guidance": 0,
+    "sd_guidance": 2,
     "sd_width": 768,
     "sd_height": 1344,
     "tts_engine": "auto",
@@ -121,25 +121,35 @@ REVIEW_RULES = {
 }
 
 KIDS_VEO_SUFFIX = (
-    " Child-friendly cartoon animation with cute non-human characters, soft bright colors, calm pacing, "
+    " Flat 2D cartoon animation, never photorealistic, correct anatomy with the right number of limbs. Child-friendly cartoon animation with cute non-human characters, soft bright colors, calm pacing, "
     "safe cheerful setting, nothing scary or dangerous, no realistic people, no logos, no flashing lights."
+)
+
+CARTOON_SUFFIX = (
+    ", flat 2D cartoon illustration, hand drawn animation style, simple stylized cartoon characters, "
+    "correct anatomy with the right number of limbs, one head per character, clean clear shapes, "
+    "not photorealistic, not a photograph, no realistic people"
 )
 
 KIDS_IMAGE_SUFFIX = ", children's picture book illustration, cute cartoon characters, bright soft colors, cheerful and safe, gentle"
 
 IMAGE_NEGATIVE = (
-    "photorealistic, realistic human, real person, photograph, text, letters, words, watermark, logo, signature, "
-    "scary, creepy, horror, violence, weapon, blood, gore, deformed, distorted, extra limbs, ugly, blurry, low quality, nsfw"
+    "photorealistic, photograph, photo, realistic human, real person, lifelike face, hyperrealistic, 3d render, "
+    "extra limbs, extra legs, extra arms, extra heads, two heads, multiple heads, duplicated body, duplicate character, "
+    "fused limbs, missing limbs, malformed limbs, deformed, mutated, disfigured, bad anatomy, wrong anatomy, "
+    "malformed hands, extra fingers, distorted face, blurry, low quality, text, letters, watermark, logo, signature, "
+    "scary, creepy, horror, violence, weapon, blood, gore, nsfw"
 )
 
 KIDS_VISION_PROMPT = """Look carefully at this image from a video for young children.
 First describe what you actually see in the image.
-Then decide: it is unsafe if it shows realistic humans or children, violence, weapons, blood, injury, scary or creepy imagery, badly deformed or duplicated faces or bodies, nudity, alcohol, tobacco, drugs, brand logos, or anything a parent would find inappropriate for a 4 year old.
+Then decide: it is unsafe if it shows photorealistic or lifelike people, realistic children, any character with the wrong number of limbs, legs, arms, or heads, duplicated or merged bodies, deformed or distorted faces, violence, weapons, blood, injury, scary or creepy imagery, nudity, alcohol, tobacco, drugs, brand logos, or anything a parent would find inappropriate for a 4 year old.
+Count the legs and heads on each animal or person before deciding.
 Reply with JSON only, filling in your own words: {"description": "what you see", "safe": true or false, "reason": "why"}"""
 
 VISION_TEXT_PROMPT = """Look at this image, which is meant for young children.
 Answer with one word, safe or unsafe, then a short reason.
-Answer unsafe if it shows realistic humans or children, violence, weapons, blood, injury, scary or creepy imagery, distorted faces or bodies, nudity, alcohol, tobacco, drugs, brand logos, or anything a parent would find inappropriate for a 4 year old."""
+Answer unsafe if it shows photorealistic or lifelike people, any character with the wrong number of limbs or heads, duplicated or merged bodies, violence, weapons, blood, injury, scary or creepy imagery, distorted faces, nudity, alcohol, tobacco, drugs, brand logos, or anything a parent would find inappropriate for a 4 year old."""
 
 KIDS_BANNED = re.compile(
     r"\b(kill\w*|blood\w*|bleed\w*|guns?|knife|knives|swords?|weapons?|bombs?|murder\w*|dead|die|dies|dying|death|"
@@ -776,6 +786,7 @@ Do not reuse the source's title, script, characters, jokes, branding, or channel
 Do not depict real people, celebrities, brands, logos, or copyrighted characters. Invent new characters.
 
 First invent the cast. "characters" is one sentence naming each character with fixed, concrete visual details (species, color, size, clothing, one distinctive feature) that never change.
+Every character is a cartoon: a cartoon animal, a cartoon creature, or a simple cartoon person. Never describe anyone as realistic, lifelike, photorealistic, or human-looking.
 
 The Short has exactly {n} scenes of {clip} seconds each. Each scene has:
 "visual": a detailed, self-contained shot description of one still image (setting, action, mood, lighting). Name the characters but do not re-describe their appearance, that comes from "characters". Never mention on-screen text or words.
@@ -1074,8 +1085,9 @@ def generate_image(s, prompt, path):
         "width": max(512, int(s["sd_width"]) // 64 * 64),
         "height": max(512, int(s["sd_height"]) // 64 * 64),
     }
-    if kwargs["guidance_scale"] > 0:
-        kwargs["negative_prompt"] = IMAGE_NEGATIVE
+    if kwargs["guidance_scale"] < 1.1:
+        kwargs["guidance_scale"] = 1.5
+    kwargs["negative_prompt"] = IMAGE_NEGATIVE
     started = datetime.now()
     image = pipe(**kwargs).images[0]
     image.save(str(path))
@@ -1177,7 +1189,7 @@ def make_clip_local(s, scene, script, path, kids):
     style = script["style"].strip()
     cast = script.get("characters", "").strip()
     cast_part = f" Characters: {cast}" if cast else ""
-    prompt = f"{scene['visual']}{cast_part} {style}{KIDS_IMAGE_SUFFIX if kids else ''}"
+    prompt = f"{scene['visual']}{cast_part} {style}{KIDS_IMAGE_SUFFIX if kids else ''}{CARTOON_SUFFIX}"
     logger.debug("Image prompt: %s", prompt)
     generate_image(s, prompt, image)
     tts_speak(s, scene["narration"], audio)
