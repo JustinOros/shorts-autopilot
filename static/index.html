@@ -27,6 +27,10 @@ main{padding:20px;max-width:1100px;margin:0 auto}
 .stat .v{font-size:17px;margin-top:4px}
 .stat .v.small{font-size:13px;word-break:break-all}
 .stat select{min-width:200px;margin-top:4px}
+#progress-panel{display:none}
+.bar{height:10px;background:#0f1115;border:1px solid var(--border);border-radius:6px;overflow:hidden;margin-top:6px}
+.bar span{display:block;height:100%;width:0;background:var(--ok);transition:width .4s ease}
+.bar.done span{background:#1b5e20}
 .badge{display:none;background:#6a1b9a;color:#fff;border-radius:10px;padding:3px 10px;font-size:12px}
 table{width:100%;border-collapse:collapse;font-size:13px}
 th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--border);vertical-align:top}
@@ -65,6 +69,10 @@ a{color:#64b5f6}
 <div class="stat"><div class="k">Published today</div><div class="v" id="st-today">0</div></div>
 <div class="stat"><div class="k">Channel</div><div class="v" id="st-channel">Not linked</div></div>
 <span class="badge" id="kids-badge">Made for kids: compliance checks on</span>
+</div>
+<div class="panel" id="progress-panel">
+<div class="row" style="justify-content:space-between"><div id="pg-stage" style="font-size:15px"></div><div class="hint" id="pg-meta"></div></div>
+<div class="bar"><span id="pg-fill"></span></div>
 </div>
 <div class="panel row">
 <div class="stat"><div class="k">Storage folder</div><div class="v small" id="st-storage"></div></div>
@@ -219,6 +227,15 @@ $("#st-free").textContent=s.storage_free_gb===null?"not created yet":s.storage_f
 $("#st-free").style.color=s.storage_free_gb!==null&&s.storage_free_gb<10?"#ffb74d":"";
 $("#st-after").textContent=s.delete_after_publish?"Delete files":"Move to published";
 $("#kids-badge").style.display=s.made_for_kids?"inline-block":"none";
+const panel=$("#progress-panel");
+if(s.steps>0&&(s.running||s.step<s.steps)){
+panel.style.display="block";
+const pct=Math.min(100,Math.round(s.step*100/s.steps));
+$("#pg-fill").style.width=pct+"%";
+$("#pg-stage").textContent=s.stage;
+const mins=Math.floor(s.elapsed/60),secs=s.elapsed%60;
+$("#pg-meta").textContent=pct+"% | step "+s.step+" of "+s.steps+(s.elapsed?" | "+(mins?mins+"m ":"")+secs+"s":"");
+}else{panel.style.display="none"}
 const lb=$("#link");lb.textContent=s.channel?"Unlink YouTube Channel":"Link YouTube Channel";lb.dataset.linked=s.channel?"1":"";
 setButton(s.running);
 $("#jobs").innerHTML="<tr><th>Started</th><th>Profile</th><th>Source</th><th>Title</th><th>Status</th><th>Video</th></tr>"+s.history.map(h=>`<tr><td>${esc(h.started)}</td><td>${esc(h.profile)}</td><td><a target="_blank" href="https://youtube.com/watch?v=${esc(h.source_id)}">${esc(h.source_title)}</a></td><td>${esc(h.title)}</td><td><span class="pill ${esc(h.status)}">${h.status==="review"?"private, needs review":esc(h.status)}</span>${h.notes?`<div class="hint notes">Reviewer notes: ${esc(h.notes)}</div>`:""}${h.error?`<div class="hint">${esc(h.error)}</div>`:""}${h.location?`<div class="hint">${esc(h.location)}</div>`:""}</td><td>${h.youtube_id?`<a target="_blank" href="https://studio.youtube.com/video/${esc(h.youtube_id)}/edit">studio</a> <a target="_blank" href="https://youtube.com/shorts/${esc(h.youtube_id)}">open</a>`:""}</td></tr>`).join("")

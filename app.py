@@ -198,7 +198,7 @@ stop_event = threading.Event()
 runner = None
 pending_flow = None
 pending_profile = None
-status = {"running": False, "stage": "idle"}
+status = {"running": False, "stage": "idle", "step": 0, "steps": 0, "job": "", "started": None}
 
 
 class Cancelled(Exception):
@@ -214,10 +214,21 @@ def check():
         raise Cancelled()
 
 
-def set_stage(stage, log=True):
+def set_stage(stage, log=True, step=None, steps=None):
     status["stage"] = stage
+    if step is not None:
+        status["step"] = step
+    if steps is not None:
+        status["steps"] = steps
     if log:
         logger.info("Stage: %s", stage)
+
+
+def reset_progress(job=""):
+    status["step"] = 0
+    status["steps"] = 0
+    status["job"] = job
+    status["started"] = datetime.now().timestamp() if job else None
 
 
 def truthy(v):
@@ -1351,6 +1362,9 @@ def run_job(s):
             "location": str(job_dir),
         }] + st["history"])[:200]
         save_state(st)
+    scenes_n = max(1, int(s["target_seconds"]) // max(1, int(s["clip_seconds"])))
+    reset_progress(job_id)
+    set_stage(status["stage"], log=False, step=1, steps=3 + scenes_n * 2 + 2)
     logger.info("Job %s: source %s '%s' (%s views)", job_id, src["id"], src["title"], f"{src['views']:,}")
     logger.info("Working folder: %s", job_dir)
     compliance = {}
@@ -1366,7 +1380,7 @@ def run_job(s):
         n = len(script["scenes"])
         for i, scene in enumerate(script["scenes"], 1):
             check()
-            set_stage(f"generating scene {i}/{n}")
+            set_stage(f"generating scene {i}/{n}", step=3 + (i - 1) * 2)
             path = job_dir / f"clip_{i:02d}.mp4"
             for attempt in range(1, 4):
                 try:
@@ -1384,7 +1398,7 @@ def run_job(s):
                     stop_event.wait(10)
                     continue
                 if kids:
-                    set_stage(f"vision check scene {i}/{n}")
+                    set_stage(f"vision check scene {i}/{n}", step=4 + (i - 1) * 2)
                     try:
                         kids_vision_check(s, path)
                         vision_log.append({"clip": i, "attempt": attempt, "result": "passed"})
@@ -1410,10 +1424,10 @@ def run_job(s):
             clips.append(path)
         if kids:
             compliance["vision_checks"] = vision_log
-        set_stage("stitching video")
+        set_stage("stitching video", step=3 + n * 2)
         final = job_dir / "final.mp4"
         concat_clips(clips, final, s["aspect_ratio"])
-        set_stage("uploading to YouTube")
+        set_stage("uploading to YouTube", step=4 + n * 2)
         vid, held = upload_video(s, final, script, tags)
         compliance["made_for_kids_flag"] = kids
         compliance["synthetic_media_flag"] = True
@@ -1434,7 +1448,7 @@ def run_job(s):
         set_stage("moving files")
         location = finish_files(s, job_dir, job_id)
         update_history(job_id, status="review" if held else "published", youtube_id=vid, location=location)
-        set_stage("job complete")
+        set_stage("job complete", step=status["steps"])
     except Cancelled:
         update_history(job_id, status="cancelled")
         logger.warning("Job %s cancelled", job_id)
@@ -1476,6 +1490,7 @@ def run_loop():
                 stop_event.wait(gap * 60)
     finally:
         status["running"] = False
+        reset_progress()
         set_stage("idle")
         logger.info("Autopilot stopped")
 
@@ -1498,6 +1513,10 @@ def api_status():
     return {
         "running": bool(runner and runner.is_alive()),
         "stage": status["stage"],
+        "step": status["step"],
+        "steps": status["steps"],
+        "job": status["job"],
+        "elapsed": int(datetime.now().timestamp() - status["started"]) if status["started"] else 0,
         "profile": s["name"],
         "engine": s["video_engine"],
         "made_for_kids": s["made_for_kids"],
