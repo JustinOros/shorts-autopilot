@@ -12,6 +12,7 @@ from collections import deque
 from datetime import date, datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import requests
 from fastapi import FastAPI, Request
@@ -79,6 +80,10 @@ GLOBAL_DEFAULTS = {
     "target_seconds": 60,
     "clip_seconds": 8,
     "error_cooldown_minutes": 5,
+    "work_hours_enabled": False,
+    "work_days": "mon,tue,wed,thu,fri,sat,sun",
+    "work_start": "09:00",
+    "work_end": "17:00",
 }
 
 PROFILE_DEFAULTS = {
@@ -99,6 +104,12 @@ PROFILE_DEFAULTS = {
     "trending_count": 25,
     "videos_per_day": 0,
     "minutes_between_videos": 0,
+    "publish_mode": "immediate",
+    "publish_timezone": "America/New_York",
+    "publish_days": "mon,tue,wed,thu,fri,sat,sun",
+    "publish_time_1": "08:00",
+    "publish_time_2": "",
+    "publish_time_3": "",
 }
 
 KIDS_RULES = """The audience is young children under 13. Follow every one of these rules:
@@ -585,6 +596,91 @@ def migrate():
         st["published"] = {"default": st["published"]}
         write_json(STATE_FILE, st)
     logger.info("Created Default profile from existing settings")
+
+
+DAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+
+
+def parse_hm(value):
+    m = re.fullmatch(r"(\d{1,2}):(\d{2})", str(value or "").strip())
+    if not m:
+        return None
+    h, mi = int(m.group(1)), int(m.group(2))
+    if h > 23 or mi > 59:
+        return None
+    return h, mi
+
+
+def day_set(value):
+    return {d.strip() for d in str(value or "").lower().split(",") if d.strip() in DAY_KEYS}
+
+
+def work_window(s, now=None):
+    if not s["work_hours_enabled"]:
+        return True, None
+    now = now or datetime.now()
+    days = day_set(s["work_days"])
+    if not days:
+        return False, None
+    start = parse_hm(s["work_start"]) or (0, 0)
+    end = parse_hm(s["work_end"]) or (23, 59)
+    t = (now.hour, now.minute)
+    today = DAY_KEYS[now.weekday()]
+    yesterday = DAY_KEYS[(now.weekday() - 1) % 7]
+    if start < end:
+        inside = today in days and start <= t < end
+    else:
+        inside = (t >= start and today in days) or (t < end and yesterday in days)
+    if inside:
+        return True, None
+    for offset in range(0, 8):
+        d = now.date() + timedelta(days=offset)
+        cand = datetime(d.year, d.month, d.day, start[0], start[1])
+        if cand > now and DAY_KEYS[cand.weekday()] in days:
+            return False, cand
+    return False, None
+
+
+def publish_zone(s):
+    try:
+        return ZoneInfo(s["publish_timezone"] or "America/New_York")
+    except Exception:
+        return ZoneInfo("America/New_York")
+
+
+def next_publish_slot(s):
+    if s["publish_mode"] != "scheduled":
+        return None
+    times = sorted({hm for hm in (parse_hm(s[k]) for k in ("publish_time_1", "publish_time_2", "publish_time_3")) if hm})
+    days = day_set(s["publish_days"])
+    if not times or not days:
+        return None
+    tz = publish_zone(s)
+    now = datetime.now(tz)
+    earliest = now + timedelta(minutes=30)
+    taken = set(load_state().get("scheduled", {}).get(s["profile_id"], []))
+    for offset in range(0, 90):
+        d = (now + timedelta(days=offset)).date()
+        if DAY_KEYS[d.weekday()] not in days:
+            continue
+        for h, m in times:
+            slot = datetime(d.year, d.month, d.day, h, m, tzinfo=tz)
+            if slot < earliest:
+                continue
+            iso = slot.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if iso not in taken:
+                return iso
+    return None
+
+
+def record_slot(pid, iso):
+    with state_lock:
+        st = load_state()
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        slots = [x for x in st.setdefault("scheduled", {}).get(pid, []) if x > now_iso]
+        slots.append(iso)
+        st["scheduled"][pid] = sorted(set(slots))
+        save_state(st)
 
 
 def load_state():
@@ -1444,9 +1540,20 @@ def upload_video(s, path, script, tags):
     description = re.sub(r"[<>]", "", f"{script['description']}\n\n#Shorts {' '.join(hashtags)}").strip()[:4500]
     privacy = s["privacy_status"]
     held = kids and s["kids_manual_review"]
+    publish_at = None
     if held:
         privacy = "private"
         logger.info("Holding made-for-kids video as private for manual review")
+        if s["publish_mode"] == "scheduled":
+            logger.info("Publishing schedule skipped because manual review hold is on")
+    else:
+        publish_at = next_publish_slot(s)
+        if publish_at:
+            privacy = "private"
+            local = datetime.strptime(publish_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).astimezone(publish_zone(s))
+            logger.info("Scheduled to go public %s", local.strftime("%a %b %d %I:%M %p %Z"))
+        elif s["publish_mode"] == "scheduled":
+            logger.warning("Publishing schedule has no valid days or times, uploading as %s", privacy)
     body = {
         "snippet": {
             "title": title,
@@ -1460,6 +1567,8 @@ def upload_video(s, path, script, tags):
             "containsSyntheticMedia": bool(s["ai_disclosure"]),
         },
     }
+    if publish_at:
+        body["status"]["publishAt"] = publish_at
     logger.info(
         "Uploading to %s as category %s, made for kids: %s, AI disclosure: %s",
         profile_channel(s["profile_id"]), body["snippet"]["categoryId"], kids, bool(s["ai_disclosure"]),
@@ -1473,7 +1582,9 @@ def upload_video(s, path, script, tags):
         if prog:
             logger.info("Upload %d%%", int(prog.progress() * 100))
     logger.info("Uploaded: https://youtube.com/shorts/%s (%s)", resp["id"], privacy)
-    return resp["id"], held
+    if publish_at:
+        record_slot(s["profile_id"], publish_at)
+    return resp["id"], held, publish_at
 
 
 def run_job(s):
@@ -1620,7 +1731,8 @@ def run_job(s):
         final = job_dir / "final.mp4"
         concat_clips(clips, final, s["aspect_ratio"])
         set_stage("uploading to YouTube", step=4 + n * 2)
-        vid, held = upload_video(s, final, script, tags)
+        vid, held, publish_at = upload_video(s, final, script, tags)
+        compliance["publish_at"] = publish_at
         compliance["made_for_kids_flag"] = kids
         compliance["synthetic_media_flag"] = bool(s["ai_disclosure"])
         compliance["held_for_review"] = held
@@ -1639,7 +1751,8 @@ def run_job(s):
                 c.unlink(missing_ok=True)
         set_stage("moving files")
         location = finish_files(s, job_dir, job_id)
-        update_history(job_id, status="review" if held else "published", youtube_id=vid, location=location, finished_ts=int(datetime.now().timestamp()))
+        final_status = "review" if held else ("scheduled" if publish_at else "published")
+        update_history(job_id, status=final_status, youtube_id=vid, location=location, publish_at=publish_at, finished_ts=int(datetime.now().timestamp()))
         set_stage("job complete", step=status["steps"])
     except Cancelled:
         update_history(job_id, status="cancelled", finished_ts=int(datetime.now().timestamp()))
@@ -1659,6 +1772,14 @@ def run_loop():
     try:
         while not stop_event.is_set():
             s = load_settings()
+            ok, resume = work_window(s)
+            if not ok:
+                msg = f"outside working hours, resumes {resume.strftime('%a %I:%M %p')}" if resume else "outside working hours, no work days selected"
+                if status["stage"] != msg:
+                    logger.info("Outside working hours, %s", msg.split(", ", 1)[1])
+                set_stage(msg, log=False)
+                stop_event.wait(60)
+                continue
             limit = int(s["videos_per_day"])
             if limit > 0 and published_today(s["profile_id"]) >= limit:
                 if status["stage"] != "daily limit reached":

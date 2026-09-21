@@ -47,7 +47,7 @@ input,select{width:100%;padding:8px;background:#0f1115;border:1px solid var(--bo
 .hint.notes{color:#ffb74d;word-break:normal}
 a{color:#64b5f6}
 .pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;background:#394150}
-.pill.published{background:#1b5e20}.pill.failed{background:#b71c1c}.pill.running{background:#e65100}.pill.review{background:#6a1b9a}
+.pill.published{background:#1b5e20}.pill.failed{background:#b71c1c}.pill.running{background:#e65100}.pill.review{background:#6a1b9a}.pill.scheduled{background:#1565c0}
 </style>
 </head>
 <body>
@@ -130,6 +130,18 @@ const FIELDS=[
 ["trending_count","Videos to scan","select:10|25|50","","p"],
 ["videos_per_day","Videos per day","select:0=Unlimited|1|2|3|4|5|6|8|10|12|15|20","The default YouTube API quota allows about 6 uploads a day. Higher values need a quota increase from Google","p"],
 ["minutes_between_videos","Minutes between videos","select:0=No gap|30|60|120|180|240|360","","p"],
+["","Publishing schedule","header","",""],
+["publish_mode","When to publish","select:immediate=As soon as it is uploaded|scheduled=At set days and times","Scheduled videos upload as private and YouTube makes them public at the next open time slot","p"],
+["publish_timezone","Publishing time zone","select:America/New_York=Eastern (US and Canada)|America/Chicago=Central (US and Canada)|America/Denver=Mountain (US and Canada)|America/Phoenix=Arizona|America/Los_Angeles=Pacific (US and Canada)|America/Anchorage=Alaska|Pacific/Honolulu=Hawaii|America/Halifax=Atlantic (Canada)|America/Mexico_City=Mexico City|Europe/London=London|Europe/Berlin=Central Europe|Asia/Kolkata=India|Australia/Sydney=Sydney|UTC=UTC","Times below are in this zone, pick your audience's","p"],
+["publish_days","Publishing days","days","","p"],
+["publish_time_1","Publish time 1","time","","p"],
+["publish_time_2","Publish time 2","time:opt","Optional","p"],
+["publish_time_3","Publish time 3","time:opt","Optional","p"],
+["","Working hours (shared by all profiles)","header","",""],
+["work_hours_enabled","Only work during set hours","checkbox","Outside these hours no new video is started. A video already in progress finishes first. Uses this computer's clock","g"],
+["work_days","Working days","days","","g"],
+["work_start","Start work at","time","","g"],
+["work_end","Stop starting new videos at","time","If this is earlier than the start time, the window runs overnight","g"],
 ["","Folders (shared by all profiles)","header","",""],
 ["storage_dir","Storage folder","wide","Full path on a large disk, e.g. /Volumes/iDrive/shorts-autopilot. Jobs are built in output/ and moved to published/","g"],
 ["models_dir","Models folder","wide","Where AI models download to (several GB). Blank puts them in the storage folder","g"],
@@ -160,6 +172,8 @@ const FIELDS=[
 ["clip_seconds","Seconds per scene","select:5|6|8|10|12","8 gives 7 scenes in a 60 second Short","g"],
 ["error_cooldown_minutes","Wait after error (minutes)","select:1|5|10|15|30|60","","g"]
 ];
+const DAYS=[["mon","Mon"],["tue","Tue"],["wed","Wed"],["thu","Thu"],["fri","Fri"],["sat","Sat"],["sun","Sun"]];
+const TIMES=[];for(let h=0;h<24;h++)for(const m of [0,30]){const v=String(h).padStart(2,"0")+":"+String(m).padStart(2,"0");const hr=h%12||12;TIMES.push([v,hr+":"+String(m).padStart(2,"0")+(h<12?" AM":" PM")])}
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 async function api(path,opts={}){const r=await fetch(path,{headers:{"Content-Type":"application/json"},...opts});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.detail||r.statusText);return j}
@@ -177,6 +191,8 @@ const s=scope==="g"?data.global:data.profile;
 let input;
 if(type.startsWith("select:")){const list=type.slice(7).split("|").map(opt);const cur=String(s[k]??"");if(!list.some(([v])=>v===cur))list.unshift([cur,cur+" (current)"]);input=`<select id="f-${k}">${list.map(([v,l])=>`<option value="${esc(v)}" ${cur===v?"selected":""}>${esc(l)}</option>`).join("")}</select>`}
 else if(type==="checkbox"){input=`<input type="checkbox" id="f-${k}" ${s[k]?"checked":""} style="width:auto">`}
+else if(type==="days"){const on=new Set(String(s[k]||"").split(","));input=`<div class="row" id="f-${k}" data-days="1" style="gap:10px">${DAYS.map(([v,l])=>`<label style="margin:0;display:flex;gap:4px;align-items:center;color:var(--text)"><input type="checkbox" value="${v}" ${on.has(v)?"checked":""} style="width:auto">${l}</label>`).join("")}</div>`}
+else if(type.startsWith("time")){const cur=String(s[k]||"");const opts=(type==="time:opt"?[["","None"]]:[]).concat(TIMES);if(cur&&!opts.some(([v])=>v===cur))opts.push([cur,cur]);input=`<select id="f-${k}">${opts.map(([v,l])=>`<option value="${esc(v)}" ${cur===v?"selected":""}>${esc(l)}</option>`).join("")}</select>`}
 else if(type.startsWith("model:")){
 const kind=type.slice(6);
 const installed=data.installed_models||[];
@@ -201,6 +217,11 @@ const kids=$("#f-made_for_kids");
 if(kids){
 for(const id of ["#f-kids_manual_review","#f-kids_llm_review"]){const el=$(id);if(!el)continue;el.disabled=!kids.checked;el.closest("div").style.opacity=kids.checked?1:.5}
 kids.onchange=syncFields}
+const dim=(ids,off)=>{for(const id of ids){const el=$(id);if(!el)continue;el.querySelectorAll?el.querySelectorAll("input").forEach(x=>x.disabled=off):0;if(el.tagName!=="DIV")el.disabled=off;el.closest(".grid > div").style.opacity=off?.5:1}};
+const wh=$("#f-work_hours_enabled");
+if(wh){dim(["#f-work_days","#f-work_start","#f-work_end"],!wh.checked);wh.onchange=syncFields}
+const pm=$("#f-publish_mode");
+if(pm){dim(["#f-publish_timezone","#f-publish_days","#f-publish_time_1","#f-publish_time_2","#f-publish_time_3"],pm.value!=="scheduled");pm.onchange=syncFields}
 const sdm=$("#f-sd_model");
 if(sdm&&!sdm.dataset.wired){sdm.dataset.wired="1";sdm.addEventListener("change",()=>{
 const best=sdm.value.includes("stable-diffusion-xl-base");
@@ -215,7 +236,9 @@ eng.onchange=syncFields}}
 async function saveSettings(){
 const body={global:{},profile:{}};
 const NUMERIC=new Set(["sd_steps","sd_guidance","sd_width","sd_height","trending_days","trending_count","videos_per_day","minutes_between_videos","target_seconds","clip_seconds","ollama_timeout","error_cooldown_minutes","tts_rate"]);
-for(const [k,,type,,scope] of FIELDS){if(type==="header")continue;const el=$("#f-"+k);body[scope==="g"?"global":"profile"][k]=type==="checkbox"?el.checked:(type==="number"||NUMERIC.has(k))?Number(el.value):el.value}
+for(const [k,,type,,scope] of FIELDS){if(type==="header")continue;const el=$("#f-"+k);const dest=body[scope==="g"?"global":"profile"];
+if(type==="days"){dest[k]=[...el.querySelectorAll("input:checked")].map(x=>x.value).join(",");continue}
+dest[k]=type==="checkbox"?el.checked:(type==="number"||NUMERIC.has(k))?Number(el.value):el.value}
 try{await api("/api/settings",{method:"POST",body:JSON.stringify(body)});await loadSettings();$("#saved").textContent="Saved "+new Date().toLocaleTimeString();refresh()}catch(e){$("#saved").textContent="Error: "+e.message}}
 async function activate(id){try{await api("/api/profiles/activate",{method:"POST",body:JSON.stringify({id})})}catch(e){alert(e.message)}await loadSettings();refresh()}
 async function refresh(){
@@ -242,7 +265,7 @@ $("#pg-meta").textContent=pct+"% | step "+s.step+" of "+s.steps+(s.elapsed?" | "
 const lb=$("#link");lb.textContent=s.channel?"Unlink YouTube Channel":"Link YouTube Channel";lb.dataset.linked=s.channel?"1":"";
 setButton(s.running);
 const dur=h=>{if(!h.started_ts)return"";const end=h.finished_ts||(h.status==="running"?s.now:0);if(!end)return"";const d=Math.max(0,end-h.started_ts);const m=Math.floor(d/60),sec=d%60;return(m?m+"m ":"")+sec+"s"};
-$("#jobs").innerHTML="<tr><th>Started</th><th>Time</th><th>Profile</th><th>Source</th><th>Title</th><th>Status</th><th>Video</th></tr>"+s.history.map(h=>`<tr><td>${esc(h.started)}</td><td style="white-space:nowrap">${esc(dur(h))}</td><td>${esc(h.profile)}</td><td><a target="_blank" href="https://youtube.com/watch?v=${esc(h.source_id)}">${esc(h.source_title)}</a></td><td>${esc(h.title)}</td><td><span class="pill ${esc(h.status)}">${h.status==="review"?"private, needs review":esc(h.status)}</span>${h.notes?`<div class="hint notes">Reviewer notes: ${esc(h.notes)}</div>`:""}${h.error?`<div class="hint">${esc(h.error)}</div>`:""}${h.location?`<div class="hint">${esc(h.location)}</div>`:""}</td><td>${h.youtube_id?`<a target="_blank" href="https://studio.youtube.com/video/${esc(h.youtube_id)}/edit">studio</a> <a target="_blank" href="https://youtube.com/shorts/${esc(h.youtube_id)}">open</a>`:""}</td></tr>`).join("")
+$("#jobs").innerHTML="<tr><th>Started</th><th>Time</th><th>Profile</th><th>Source</th><th>Title</th><th>Status</th><th>Video</th></tr>"+s.history.map(h=>`<tr><td>${esc(h.started)}</td><td style="white-space:nowrap">${esc(dur(h))}</td><td>${esc(h.profile)}</td><td><a target="_blank" href="https://youtube.com/watch?v=${esc(h.source_id)}">${esc(h.source_title)}</a></td><td>${esc(h.title)}</td><td><span class="pill ${esc(h.status)}">${h.status==="review"?"private, needs review":h.status==="scheduled"&&h.publish_at?"scheduled "+new Date(h.publish_at).toLocaleString([], {weekday:"short",month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}):esc(h.status)}</span>${h.notes?`<div class="hint notes">Reviewer notes: ${esc(h.notes)}</div>`:""}${h.error?`<div class="hint">${esc(h.error)}</div>`:""}${h.location?`<div class="hint">${esc(h.location)}</div>`:""}</td><td>${h.youtube_id?`<a target="_blank" href="https://studio.youtube.com/video/${esc(h.youtube_id)}/edit">studio</a> <a target="_blank" href="https://youtube.com/shorts/${esc(h.youtube_id)}">open</a>`:""}</td></tr>`).join("")
 }catch(e){}}
 let since=0;
 async function pollLogs(){
