@@ -66,8 +66,8 @@ GLOBAL_DEFAULTS = {
     "sd_model": "stabilityai/sdxl-turbo",
     "sd_steps": 4,
     "sd_guidance": 2,
-    "sd_width": 768,
-    "sd_height": 1344,
+    "sd_width": 704,
+    "sd_height": 1216,
     "tts_engine": "auto",
     "tts_voice": "af_heart",
     "tts_rate": 170,
@@ -91,6 +91,7 @@ PROFILE_DEFAULTS = {
     "upload_category_id": "24",
     "privacy_status": "private",
     "trending_query": "",
+    "trending_queries": "",
     "trending_days": 7,
     "category_id": "",
     "region_code": "US",
@@ -644,12 +645,19 @@ def filter_language(videos, lang, strict=False):
     return kept
 
 
-def fetch_trending(s):
+def profile_queries(s):
+    extra = [q.strip() for q in re.split(r"[,\n]", s.get("trending_queries", "")) if q.strip()]
+    main = s["trending_query"].strip()
+    queries = ([main] if main else []) + extra
+    return queries
+
+
+def fetch_trending(s, query=None):
     yt = youtube_client(s["profile_id"])
     count = max(1, min(int(s["trending_count"]), 50))
     region = s["region_code"] or "US"
     lang = s["source_language"].strip().lower()
-    query = s["trending_query"].strip()
+    query = (query if query is not None else s["trending_query"]).strip()
     if query:
         after = (datetime.now(timezone.utc) - timedelta(days=max(1, int(s["trending_days"])))).strftime("%Y-%m-%dT%H:%M:%SZ")
         params = {
@@ -991,10 +999,7 @@ Return {{"violations": []}} if no rule is broken."""
 
 
 def review_mode(s):
-    mode = s["kids_llm_review"] if s["kids_llm_review"] in REVIEW_MODES else "advisory"
-    if mode == "advisory" and not s["kids_manual_review"]:
-        return "block"
-    return mode
+    return s["kids_llm_review"] if s["kids_llm_review"] in REVIEW_MODES else "advisory"
 
 
 def produce_script(s, src):
@@ -1002,8 +1007,6 @@ def produce_script(s, src):
     feedback = []
     attempts = 4 if kids else 1
     mode = review_mode(s)
-    if kids and mode != s["kids_llm_review"]:
-        logger.info("LLM review switched to block mode because manual review is off")
     for attempt in range(1, attempts + 1):
         check()
         set_stage("writing script")
@@ -1081,8 +1084,12 @@ def kids_vision_check(s, clip_path):
     try:
         try:
             data = ollama_call(s, KIDS_VISION_PROMPT, temperature=0.1, model=model, images=images, num_predict=256)
-            safe = truthy(data.get("safe"))
+            desc = str(data.get("description", ""))
             reason = str(data.get("reason", ""))
+            echoed = "it is unsafe if" in reason.lower() or reason.strip().lower() in ("why", "short explanation")
+            if echoed or desc.strip().lower() in ("what you see", "description"):
+                raise ValueError("model echoed the prompt")
+            safe = truthy(data.get("safe"))
         except (requests.exceptions.HTTPError, ValueError):
             text = ollama_call(s, VISION_TEXT_PROMPT, temperature=0.1, model=model, images=images, num_predict=128, as_json=False)
             low = text.lower()
@@ -1371,14 +1378,23 @@ def run_job(s):
             ", manual review hold" if s["kids_manual_review"] else "",
         )
     set_stage("fetching trending videos")
-    trending = fetch_trending(s)
     state = load_state()
-    candidates = [v for v in sorted(trending, key=lambda v: -v["views"]) if v["id"] not in state["processed"]]
-    if kids:
-        safe = [v for v in candidates if not KIDS_BANNED.search(v["title"])]
-        if len(safe) < len(candidates):
-            logger.info("Skipped %d source videos with themes unsuitable for kids", len(candidates) - len(safe))
-        candidates = safe
+    queries = profile_queries(s) or [""]
+    candidates = []
+    for q in queries:
+        check()
+        trending = fetch_trending(s, q)
+        found = [v for v in sorted(trending, key=lambda v: -v["views"]) if v["id"] not in state["processed"]]
+        if kids:
+            safe = [v for v in found if not KIDS_BANNED.search(v["title"])]
+            if len(safe) < len(found):
+                logger.info("Skipped %d source videos with themes unsuitable for kids", len(found) - len(safe))
+            found = safe
+        if found:
+            candidates = found
+            break
+        if len(queries) > 1:
+            logger.info("Nothing new for '%s', trying the next query", q or "trending chart")
     if not candidates:
         logger.warning("No usable trending videos, checking again in 30 minutes")
         set_stage("waiting for new trending videos")
