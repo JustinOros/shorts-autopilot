@@ -123,13 +123,13 @@ const FIELDS=[
 ["ai_disclosure","Disclose AI generated content","checkbox","YouTube only requires this for realistic synthetic content, not cartoons. Leave on to be transparent with parents","p"],
 ["trending_query","Trending search query","text","Blank uses the general trending chart. e.g. kids animated story","p"],
 ["trending_queries","Backup search queries","wide","Comma separated. Tried in order when the main query has nothing new left","p"],
-["trending_days","Search window (days)","number","Only used with a search query","p"],
+["trending_days","Search window (days)","select:3|7|14|30|60|90","Only used with a search query","p"],
 ["category_id","Source category","select:=All|"+CATS,"Filters source videos","p"],
-["region_code","Region","text","Two-letter country code, e.g. US","p"],
-["source_language","Source language","text","Two-letter code, e.g. en. Skips source videos in other languages. Blank for any","p"],
-["trending_count","Videos to scan","number","Max 50","p"],
-["videos_per_day","Videos per day","number","0 runs continuously","p"],
-["minutes_between_videos","Minutes between videos","number","0 for no gap","p"],
+["region_code","Region","select:US=United States|GB=United Kingdom|CA=Canada|AU=Australia|NZ=New Zealand|IE=Ireland|IN=India|PH=Philippines|ZA=South Africa|DE=Germany|FR=France|ES=Spain|MX=Mexico|BR=Brazil|JP=Japan","","p"],
+["source_language","Source language","select:en=English|es=Spanish|fr=French|de=German|pt=Portuguese|it=Italian|=Any language","Skips source videos in other languages","p"],
+["trending_count","Videos to scan","select:10|25|50","","p"],
+["videos_per_day","Videos per day","select:0=Unlimited|1|2|3|4|5|6","YouTube API quota allows about 6 uploads a day","p"],
+["minutes_between_videos","Minutes between videos","select:0=No gap|30|60|120|180|240|360","","p"],
 ["","Folders (shared by all profiles)","header","",""],
 ["storage_dir","Storage folder","wide","Full path on a large disk, e.g. /Volumes/iDrive/shorts-autopilot. Jobs are built in output/ and moved to published/","g"],
 ["models_dir","Models folder","wide","Where AI models download to (several GB). Blank puts them in the storage folder","g"],
@@ -139,13 +139,13 @@ const FIELDS=[
 ["auto_install","Install missing pieces automatically","checkbox","Downloads models and installs packages when a run needs them","g"],
 ["","Video engine (shared by all profiles)","header","",""],
 ["video_engine","Video engine","select:local=Local (free: AI images, narration, motion)|veo=Veo (paid Google API)","Local runs entirely on this machine at no cost. Veo makes true AI video but needs billing","g"],
-["sd_model","Image model","text","Hugging Face model id, e.g. stabilityai/sdxl-turbo or stabilityai/stable-diffusion-xl-base-1.0","g"],
-["sd_steps","Image steps","number","4 for turbo models, 20 to 30 for standard models","g"],
-["sd_guidance","Image guidance","number","2 for turbo models, 7 for standard models. Below 1.1 the anatomy filter stops working","g"],
-["sd_width","Image width","number","704 is a good speed and quality balance. Larger is much slower","g"],
-["sd_height","Image height","number","1216 keeps the vertical ratio SDXL expects","g"],
+["sd_model","Image model","select:stabilityai/sdxl-turbo=Fast (SDXL Turbo)|stabilityai/stable-diffusion-xl-base-1.0=Best quality (SDXL Base, slower)","Picking a model fills in its recommended steps, guidance, and size. First use downloads about 7 GB","g"],
+["sd_steps","Image steps","select:4|6|8|20|25|30","4 to 8 for Fast, 20 to 30 for Best quality","g"],
+["sd_guidance","Image guidance","select:2|3|5|7|8","2 for Fast, 7 for Best quality","g"],
+["sd_width","Image width","select:640|704|768|832","Larger is slower","g"],
+["sd_height","Image height","select:1152|1216|1344|1472","Keep close to a 9:16 ratio with the width","g"],
 ["tts_engine","Narration engine","select:auto=Auto (best available)|kokoro=Kokoro (most natural)|piper=Piper|say=macOS say|espeak=espeak-ng","Missing engines are installed automatically on the next run","g"],
-["tts_voice","Narration voice","text","Kokoro: af_heart, af_bella, af_nicole, am_michael, bf_emma. Ignored by the system voice","g"],
+["tts_voice","Narration voice","select:af_heart=Heart (US female, warm)|af_bella=Bella (US female)|af_nicole=Nicole (US female, soft)|af_sarah=Sarah (US female)|af_sky=Sky (US female)|am_michael=Michael (US male)|am_adam=Adam (US male)|bf_emma=Emma (UK female)|bf_isabella=Isabella (UK female)|bm_george=George (UK male)|bm_lewis=Lewis (UK male)","Kokoro voices. The system voice ignores this","g"],
 ["tts_rate","Narration speed","number","Only used by the system voice. Words per minute","g"],
 ["piper_model","Piper voice file","wide","Blank uses the first voice found in the voices folder under Models","g"],
 ["gemini_api_key","Gemini API key (Veo)","password","Only needed for the Veo engine. Billing must be enabled","g"],
@@ -154,11 +154,11 @@ const FIELDS=[
 ["ollama_url","Ollama URL","text","","g"],
 ["ollama_model","Ollama model","model:text","Writes scripts and tags. Models not installed yet are downloaded automatically","g"],
 ["vision_model","Ollama vision model","model:vision","Checks generated scenes on made-for-kids profiles. moondream suits 16 GB machines","g"],
-["ollama_timeout","Ollama timeout (seconds)","number","Max wait per Ollama request before retrying","g"],
+["ollama_timeout","Ollama timeout (seconds)","select:120|300|600|900","Max wait per Ollama request before retrying","g"],
 ["aspect_ratio","Aspect ratio","select:9:16|16:9","","g"],
-["target_seconds","Target length (seconds)","number","Split into scenes of the length below","g"],
-["clip_seconds","Seconds per scene","number","8 gives 7 scenes in a 60 second Short","g"],
-["error_cooldown_minutes","Wait after error (minutes)","number","","g"]
+["target_seconds","Target length (seconds)","select:30|45|60|90|120|180","Split into scenes of the length below","g"],
+["clip_seconds","Seconds per scene","select:5|6|8|10|12","8 gives 7 scenes in a 60 second Short","g"],
+["error_cooldown_minutes","Wait after error (minutes)","select:1|5|10|15|30|60","","g"]
 ];
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -175,7 +175,7 @@ for(const [k,label,type,hint,scope] of FIELDS){
 if(type==="header"){const h=document.createElement("h3");h.textContent=label;g.appendChild(h);continue}
 const s=scope==="g"?data.global:data.profile;
 let input;
-if(type.startsWith("select:")){input=`<select id="f-${k}">${type.slice(7).split("|").map(o=>{const [v,l]=opt(o);return `<option value="${esc(v)}" ${String(s[k])===v?"selected":""}>${esc(l)}</option>`}).join("")}</select>`}
+if(type.startsWith("select:")){const list=type.slice(7).split("|").map(opt);const cur=String(s[k]??"");if(!list.some(([v])=>v===cur))list.unshift([cur,cur+" (current)"]);input=`<select id="f-${k}">${list.map(([v,l])=>`<option value="${esc(v)}" ${cur===v?"selected":""}>${esc(l)}</option>`).join("")}</select>`}
 else if(type==="checkbox"){input=`<input type="checkbox" id="f-${k}" ${s[k]?"checked":""} style="width:auto">`}
 else if(type.startsWith("model:")){
 const kind=type.slice(6);
@@ -206,6 +206,11 @@ const kids=$("#f-made_for_kids");
 if(kids){
 for(const id of ["#f-kids_manual_review","#f-kids_llm_review"]){const el=$(id);if(!el)continue;el.disabled=!kids.checked;el.closest("div").style.opacity=kids.checked?1:.5}
 kids.onchange=syncFields}
+const sdm=$("#f-sd_model");
+if(sdm&&!sdm.dataset.wired){sdm.dataset.wired="1";sdm.addEventListener("change",()=>{
+const best=sdm.value.includes("stable-diffusion-xl-base");
+const set=(id,v)=>{const el=$(id);if(!el)return;if(![...el.options].some(o=>o.value===v)){const o=document.createElement("option");o.value=v;o.textContent=v;el.appendChild(o)}el.value=v};
+set("#f-sd_steps",best?"25":"4");set("#f-sd_guidance",best?"7":"2");set("#f-sd_width",best?"768":"704");set("#f-sd_height",best?"1344":"1216")})}
 const eng=$("#f-video_engine");
 if(eng){
 const local=eng.value==="local";
@@ -214,7 +219,8 @@ for(const id of ["#f-gemini_api_key","#f-veo_model"]){const el=$(id);if(!el)cont
 eng.onchange=syncFields}}
 async function saveSettings(){
 const body={global:{},profile:{}};
-for(const [k,,type,,scope] of FIELDS){if(type==="header")continue;const el=$("#f-"+k);body[scope==="g"?"global":"profile"][k]=type==="checkbox"?el.checked:type==="number"?Number(el.value):el.value}
+const NUMERIC=new Set(["sd_steps","sd_guidance","sd_width","sd_height","trending_days","trending_count","videos_per_day","minutes_between_videos","target_seconds","clip_seconds","ollama_timeout","error_cooldown_minutes","tts_rate"]);
+for(const [k,,type,,scope] of FIELDS){if(type==="header")continue;const el=$("#f-"+k);body[scope==="g"?"global":"profile"][k]=type==="checkbox"?el.checked:(type==="number"||NUMERIC.has(k))?Number(el.value):el.value}
 try{await api("/api/settings",{method:"POST",body:JSON.stringify(body)});await loadSettings();$("#saved").textContent="Saved "+new Date().toLocaleTimeString();refresh()}catch(e){$("#saved").textContent="Error: "+e.message}}
 async function activate(id){try{await api("/api/profiles/activate",{method:"POST",body:JSON.stringify({id})})}catch(e){alert(e.message)}await loadSettings();refresh()}
 async function refresh(){

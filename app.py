@@ -182,6 +182,12 @@ class BufferHandler(logging.Handler):
 logger = logging.getLogger("shorts")
 logger.setLevel(logging.DEBUG)
 logger.propagate = False
+for _old in list(logger.handlers):
+    logger.removeHandler(_old)
+    try:
+        _old.close()
+    except Exception:
+        pass
 _fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
 for _h in (
     RotatingFileHandler(LOG_FILE, maxBytes=5_000_000, backupCount=5, encoding="utf-8"),
@@ -1806,7 +1812,17 @@ def auth_unlink():
 
 
 if __name__ == "__main__":
+    import socket
     import uvicorn
+    probe = socket.socket()
+    try:
+        probe.bind(("127.0.0.1", 8000))
+    except OSError:
+        print("Shorts Autopilot is already running at http://localhost:8000")
+        print("Stop it first with: pkill -f app.py")
+        raise SystemExit(1)
+    finally:
+        probe.close()
     if not shutil.which("ffmpeg"):
         logger.warning("ffmpeg not found on PATH, video stitching will fail")
     uvicorn.run(app, host="127.0.0.1", port=8000)
