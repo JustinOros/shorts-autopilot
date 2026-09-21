@@ -1733,10 +1733,13 @@ async def api_pull_model(request: Request):
 def api_clear_history():
     with state_lock:
         st = load_state()
-        st["history"] = []
-        save_state(st)
-    logger.info("Cleared the job history")
-    return {"ok": True}
+        count = len(st["history"])
+        if count:
+            st["history"] = []
+            save_state(st)
+    if count:
+        logger.info("Cleared %d jobs from the list", count)
+    return {"ok": True, "cleared": count}
 
 
 @app.get("/api/trending")

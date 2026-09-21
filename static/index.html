@@ -290,8 +290,11 @@ try{document.execCommand("copy");$("#copy-msg").textContent="Copied"}catch(err){
 ta.remove()}
 setTimeout(()=>{$("#copy-msg").textContent=""},3000)};
 $("#clear-jobs").onclick=async()=>{
-if(!confirm("Clear the job list? Videos on disk and on YouTube are not touched."))return;
-try{await api("/api/history/clear",{method:"POST"});refresh()}catch(e){alert(e.message)}};
+const b=$("#clear-jobs");
+if(b.disabled)return;
+b.disabled=true;
+try{await api("/api/history/clear",{method:"POST"});await refresh()}catch(e){alert(e.message)}
+b.disabled=false};
 $("#preview").onclick=async()=>{
 $("#preview-msg").textContent="Loading...";
 try{
