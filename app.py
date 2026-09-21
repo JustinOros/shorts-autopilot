@@ -885,6 +885,59 @@ Return JSON only in this shape:
     raise RuntimeError(f"Could not generate a valid script: {last}")
 
 
+_english_words = None
+
+
+def english_words():
+    global _english_words
+    if _english_words is None:
+        words = set()
+        for f in ("/usr/share/dict/words", "/usr/share/dict/american-english", "/usr/share/dict/british-english"):
+            try:
+                words |= {w.strip().lower() for w in open(f, encoding="utf-8", errors="ignore") if w.strip()}
+            except OSError:
+                continue
+        _english_words = words
+    return _english_words
+
+
+def is_english_word(w, extra):
+    w = w.lower().strip("'")
+    if not w or w.isdigit() or w in extra:
+        return True
+    vocab = english_words()
+    if not vocab:
+        return True
+    if w in vocab:
+        return True
+    for suffix in ("s", "es", "'s", "ers", "er", "ing", "ed", "ies", "ly"):
+        if w.endswith(suffix) and len(w) > len(suffix) + 2:
+            stem = w[: -len(suffix)]
+            if stem in vocab or stem + "e" in vocab or (suffix == "ies" and stem + "y" in vocab):
+                return True
+    return False
+
+
+def english_tags(tags, script):
+    extra = set(re.findall(r"[a-z]+", script_text(script).lower()))
+    extra |= {
+        "youtube", "shorts", "kid", "kids", "kiddie", "preschool", "preschooler", "preschoolers", "toddler", "toddlers",
+        "storytime", "storybook", "bedtime", "cartoon", "cartoons", "animated", "animation", "teamwork", "video", "videos",
+        "online", "sel", "abc", "abcs", "diy", "fun", "3d", "2d", "short", "film",
+    }
+    kept, dropped = [], []
+    for tag in tags:
+        if not tag.isascii():
+            dropped.append(tag)
+            continue
+        words = re.findall(r"[A-Za-z']+|\d+", tag)
+        if words and all(is_english_word(w, extra) for w in words):
+            kept.append(tag)
+        else:
+            dropped.append(tag)
+    return kept, dropped
+
+
 def clean_tags(tags):
     out, seen, total = [], set(), 0
     for t in tags:
@@ -908,6 +961,7 @@ def make_tags(s, script):
     prompt = f"""Generate YouTube tags for this Short.
 Include specific tags for its exact subject plus broader category, genre, and audience tags that help discovery.
 Every tag must accurately describe the video. No unrelated trending terms, no names of other creators, people, brands, or copyrighted characters.
+Write every tag in plain English words only.
 {niche_line}{kids_line}
 Title: {script['title']}
 Description: {script['description']}
@@ -922,6 +976,10 @@ Return JSON only: {{"tags": ["15 to 25 tags, most specific first"]}}"""
             if isinstance(raw, str):
                 raw = raw.split(",")
             tags = clean_tags(raw)
+            if s["source_language"].strip().lower() in ("", "en"):
+                tags, dropped = english_tags(tags, script)
+                if dropped:
+                    logger.info("Dropped non-English tags: %s", ", ".join(dropped))
             if tags:
                 return tags
         except Cancelled:
