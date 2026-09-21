@@ -48,7 +48,7 @@ REVIEW_MODES = ("advisory", "block", "off")
 ENGINES = ("local", "veo")
 TTS_ENGINES = ("auto", "kokoro", "piper", "say", "espeak")
 SUGGESTED_TEXT_MODELS = ["llama3.1:8b", "llama3.2:3b", "qwen2.5:7b", "mistral:7b"]
-SUGGESTED_VISION_MODELS = ["llava:7b", "qwen2.5vl:7b", "llama3.2-vision", "moondream"]
+SUGGESTED_VISION_MODELS = ["qwen2.5vl:7b", "llava:7b", "llama3.2-vision", "moondream"]
 SMALL_VISION_MODELS = ("moondream", "llava-phi3", "bakllava")
 
 GLOBAL_DEFAULTS = {
@@ -61,7 +61,7 @@ GLOBAL_DEFAULTS = {
     "video_engine": "local",
     "ollama_url": "http://localhost:11434",
     "ollama_model": "llama3.1:8b",
-    "vision_model": "llava:7b",
+    "vision_model": "qwen2.5vl:7b",
     "ollama_timeout": 300,
     "sd_model": "stabilityai/sdxl-turbo",
     "sd_steps": 4,
@@ -129,7 +129,7 @@ KIDS_VEO_SUFFIX = (
 
 CARTOON_SUFFIX = (
     ", flat 2D cartoon illustration, hand drawn animation style, simple stylized cartoon characters, "
-    "correct anatomy with the right number of limbs, one head per character, clean clear shapes, "
+    "correct anatomy with the right number of limbs, one head per character, exactly two ears and two eyes per animal, clean clear shapes, "
     "not photorealistic, not a photograph, no realistic people"
 )
 
@@ -138,6 +138,7 @@ KIDS_IMAGE_SUFFIX = ", children's picture book illustration, cute cartoon charac
 IMAGE_NEGATIVE = (
     "photorealistic, photograph, photo, realistic human, real person, lifelike face, hyperrealistic, 3d render, "
     "extra limbs, extra legs, extra arms, extra heads, two heads, multiple heads, duplicated body, duplicate character, "
+    "extra ears, three ears, four ears, extra eyes, three eyes, extra tails, extra noses, extra mouths, "
     "fused limbs, missing limbs, malformed limbs, deformed, mutated, disfigured, bad anatomy, wrong anatomy, "
     "malformed hands, extra fingers, distorted face, blurry, low quality, text, letters, watermark, logo, signature, "
     "scary, creepy, horror, violence, weapon, blood, gore, nsfw"
@@ -146,12 +147,12 @@ IMAGE_NEGATIVE = (
 KIDS_VISION_PROMPT = """Look carefully at this image from a video for young children.
 First describe what you actually see in the image.
 Then decide: it is unsafe if it shows photorealistic or lifelike people, realistic children, any character with the wrong number of limbs, legs, arms, or heads, duplicated or merged bodies, deformed or distorted faces, violence, weapons, blood, injury, scary or creepy imagery, nudity, alcohol, tobacco, drugs, brand logos, or anything a parent would find inappropriate for a 4 year old.
-Count the legs and heads on each animal or person before deciding.
+Count the heads, ears, eyes, legs, arms, and tails on each animal or person before deciding. Any extra ear, eye, limb, or tail makes it unsafe.
 Reply with JSON only, filling in your own words: {"description": "what you see", "safe": true or false, "reason": "why"}"""
 
 VISION_TEXT_PROMPT = """Look at this image, which is meant for young children.
 Answer with one word, safe or unsafe, then a short reason.
-Answer unsafe if it shows photorealistic or lifelike people, any character with the wrong number of limbs or heads, duplicated or merged bodies, violence, weapons, blood, injury, scary or creepy imagery, distorted faces, nudity, alcohol, tobacco, drugs, brand logos, or anything a parent would find inappropriate for a 4 year old."""
+Answer unsafe if it shows photorealistic or lifelike people, any character with the wrong number of heads, ears, eyes, limbs, or tails, duplicated or merged bodies, violence, weapons, blood, injury, scary or creepy imagery, distorted faces, nudity, alcohol, tobacco, drugs, brand logos, or anything a parent would find inappropriate for a 4 year old."""
 
 KIDS_BANNED = re.compile(
     r"\b(kill\w*|blood\w*|bleed\w*|guns?|knife|knives|swords?|weapons?|bombs?|murder\w*|dead|die|dies|dying|death|"
@@ -1132,48 +1133,75 @@ def unload_pipeline():
 INCONCLUSIVE = ("don't know", "do not know", "not sure", "cannot", "can't", "unable", "no image", "what you see", "short explanation")
 
 
+VISION_QUESTIONS = [
+    ("extra ears", "Look closely at every animal and character. Does any single animal or character have more than two ears? Answer only yes or no."),
+    ("extra eyes", "Does any single animal or character have more than two eyes? Answer only yes or no."),
+    ("extra heads", "Does any single animal or character have more than one head, or are two bodies merged together? Answer only yes or no."),
+    ("extra limbs", "Count the legs and arms on each animal and character. Does any of them have more legs or arms than that kind of creature should have? Answer only yes or no."),
+    ("realistic person", "Is there a realistic, photograph-like human being in this image, rather than a cartoon? Answer only yes or no."),
+    ("unsuitable", "Is there anything scary, violent, creepy, or inappropriate for a 4 year old child in this image? Answer only yes or no."),
+]
+
+
+def vision_image(s, clip_path):
+    src = clip_path.with_suffix(".png")
+    out = clip_path.with_name(f"{clip_path.stem}_check.jpg")
+    if src.exists():
+        cmd = ["ffmpeg", "-y", "-i", str(src), "-vf", "scale=-2:1024", "-q:v", "3", str(out)]
+    else:
+        cmd = ["ffmpeg", "-y", "-ss", str(int(s["clip_seconds"]) / 2), "-i", str(clip_path), "-frames:v", "1", "-vf", "scale=-2:1024", "-q:v", "3", str(out)]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0 or not out.exists():
+        raise RuntimeError("Could not prepare an image for the vision check")
+    data = base64.b64encode(out.read_bytes()).decode()
+    out.unlink(missing_ok=True)
+    return data
+
+
+def yes_no(text):
+    low = text.strip().lower()
+    m = re.match(r"^\W*(yes|no)\b", low)
+    if m:
+        return m.group(1) == "yes"
+    has_yes = re.search(r"\byes\b", low)
+    has_no = re.search(r"\bno\b", low)
+    if has_yes and not has_no:
+        return True
+    if has_no and not has_yes:
+        return False
+    return None
+
+
 def kids_vision_check(s, clip_path):
     model = s["vision_model"].strip()
     if not model:
         raise RuntimeError("Made for kids requires a vision model in Settings to check generated clips")
-    frame = clip_path.with_name(f"{clip_path.stem}_frame.jpg")
-    r = subprocess.run(
-        ["ffmpeg", "-y", "-ss", str(int(s["clip_seconds"]) / 2), "-i", str(clip_path), "-frames:v", "1", "-vf", "scale=512:-2", str(frame)],
-        capture_output=True, text=True,
-    )
-    if r.returncode != 0 or not frame.exists():
-        raise RuntimeError("Could not extract a frame for the vision check")
-    images = [base64.b64encode(frame.read_bytes()).decode()]
-    frame.unlink(missing_ok=True)
-    verdict, detail = None, ""
+    images = [vision_image(s, clip_path)]
+    problems = []
+    unclear = []
     try:
-        try:
-            data = ollama_call(s, KIDS_VISION_PROMPT, temperature=0.1, model=model, images=images, num_predict=300)
-            desc = str(data.get("description", "")).strip()
-            reason = str(data.get("reason", "")).strip()
-            low = f"{desc} {reason}".lower()
-            echoed = "it is unsafe if" in low
-            if desc and not echoed and not any(x in low for x in INCONCLUSIVE) and "safe" in data:
-                verdict = truthy(data.get("safe"))
-                detail = f"{desc} | {reason}"
-        except (requests.exceptions.HTTPError, ValueError):
-            pass
-        if verdict is None:
-            text = ollama_call(s, VISION_TEXT_PROMPT, temperature=0.1, model=model, images=images, num_predict=150, as_json=False).strip()
-            low = text.lower()
-            if low.startswith("unsafe") or re.search(r"\bunsafe\b", low):
-                verdict, detail = False, text
-            elif re.match(r"^\W*safe\b", low) and not any(x in low for x in INCONCLUSIVE):
-                verdict, detail = True, text
+        desc = ollama_call(s, "Describe this image in one short sentence.", temperature=0.1, model=model, images=images, num_predict=80, as_json=False).strip()
+        for key, question in VISION_QUESTIONS:
+            check()
+            answer = None
+            for _ in range(2):
+                reply = ollama_call(s, question, temperature=0.0, model=model, images=images, num_predict=10, as_json=False)
+                answer = yes_no(reply)
+                if answer is not None:
+                    break
+            if answer is None:
+                unclear.append(key)
+            elif answer:
+                problems.append(key)
     except Cancelled:
         raise
     except Exception as e:
         raise VisionUnavailable(f"vision model '{model}' could not run: {e}") from e
-    if verdict is None:
-        raise VisionUnavailable(f"vision model '{model}' gave no clear answer, try llava:7b")
-    if not verdict:
-        raise ValueError(f"Vision check rejected {clip_path.name}: {detail[:200] or 'no reason given'}")
-    logger.info("Vision check passed for %s: %s", clip_path.name, detail[:160])
+    if problems:
+        raise ValueError(f"Vision check rejected {clip_path.name}: {', '.join(problems)} ({desc[:120]})")
+    if unclear:
+        raise VisionUnavailable(f"vision model '{model}' gave no clear answer about {', '.join(unclear)}")
+    logger.info("Vision check passed for %s: %s", clip_path.name, desc[:160])
 
 
 def load_pipeline(s):
