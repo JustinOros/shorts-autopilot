@@ -187,7 +187,7 @@ const opts=[];
 for(const m of installed){if(seen.has(m))continue;seen.add(m);opts.push(`<option value="${esc(m)}" ${cur===m?"selected":""}>${esc(m)}</option>`)}
 for(const m of suggested){if(seen.has(m)||seen.has(m+":latest"))continue;seen.add(m);opts.push(`<option value="${esc(m)}" ${cur===m?"selected":""}>${esc(m)} (not installed)</option>`)}
 if(cur&&!seen.has(cur))opts.unshift(`<option value="${esc(cur)}" selected>${esc(cur)} (not installed)</option>`);
-input=`<div class="row" style="gap:6px"><select id="f-${k}" style="flex:1">${opts.join("")}</select><button type="button" class="btn secondary pull" data-for="${k}" style="padding:8px 12px;font-size:13px">Pull now</button></div>`}
+input=`<select id="f-${k}">${opts.join("")}</select>`}
 else{input=`<input type="${type==="wide"?"text":type}" id="f-${k}" value="${esc(s[k])}">`}
 let extra="";
 if(k==="storage_dir")extra=`<div class="hint">Resolves to: ${esc(data.storage_resolved)}</div>`;
@@ -195,11 +195,6 @@ if(k==="models_dir")extra=`<div class="hint">Resolves to: ${esc(data.models_reso
 if(k==="temp_dir")extra=`<div class="hint">Resolves to: ${esc(data.temp_resolved)}</div>`;
 const d=document.createElement("div");if(type==="wide")d.className="wide";
 d.innerHTML=`<label>${label}</label>${input}${hint?`<div class="hint">${esc(hint)}</div>`:""}${extra}`;g.appendChild(d)}
-document.querySelectorAll("button.pull").forEach(b=>b.onclick=async()=>{
-const sel=$("#f-"+b.dataset.for);const model=sel.value;
-b.disabled=true;const was=b.textContent;b.textContent="Pulling...";
-try{await api("/api/models/pull",{method:"POST",body:JSON.stringify({model})});await loadSettings()}
-catch(e){alert(e.message);b.disabled=false;b.textContent=was}});
 syncFields()}
 function syncFields(){
 const kids=$("#f-made_for_kids");
