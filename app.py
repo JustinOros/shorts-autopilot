@@ -2022,9 +2022,10 @@ async def api_pull_model(request: Request):
 def api_clear_history():
     with state_lock:
         st = load_state()
-        count = len(st["history"])
+        keep = [h for h in st["history"] if h.get("status") == "running"]
+        count = len(st["history"]) - len(keep)
         if count:
-            st["history"] = []
+            st["history"] = keep
             save_state(st)
     if count:
         logger.info("Cleared %d jobs from the list", count)
