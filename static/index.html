@@ -175,6 +175,9 @@ input:disabled,select:disabled{opacity:.55}
 #log .ERROR,#log .CRITICAL{color:var(--coral)}
 #log .WARNING{color:var(--amber)}
 #log .DEBUG{color:var(--faint)}
+.storage-line{display:flex;align-items:center;gap:8px;margin-top:18px;flex-wrap:wrap}
+.icon-btn.folder{width:30px;height:30px}
+.icon-btn.folder:hover{color:var(--gold-text)}
 .tools{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:0 0 22px}
 .tools .status{font-size:14px;color:var(--muted)}
 #trending-panel{margin:0 0 24px}
@@ -235,7 +238,7 @@ main{padding:20px 16px 120px}
 </div>
 </div>
 <div class="table-wrap"><table id="jobs"></table></div>
-<p class="muted small" id="st-storage" style="margin-top:18px"></p>
+<p class="storage-line muted small"><span id="st-storage"></span><button class="icon-btn folder" id="open-folder" aria-label="Show the videos folder in Finder" title="Show in Finder"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg></button><span id="folder-msg"></span></p>
 </section>
 <section id="settings" class="tab">
 <div class="settings">
@@ -498,6 +501,7 @@ if(!confirm("Unlink the YouTube channel from this profile?"))return;
 await api("/auth/unlink",{method:"POST"});lastChannel="";await loadSettings();refresh()}
 else{window.location.href="/auth/start"}}
 $("#save").onclick=saveSettings;
+$("#open-folder").onclick=async()=>{const m=$("#folder-msg");try{await api("/api/open-storage",{method:"POST"});m.textContent=""}catch(e){m.textContent=e.message}};
 $("#clear").onclick=()=>{$("#log").innerHTML=""};
 $("#copy-log").onclick=async()=>{
 const text=$("#log").innerText.trim();const m=$("#copy-msg");

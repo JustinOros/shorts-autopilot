@@ -2032,6 +2032,21 @@ def api_clear_history():
     return {"ok": True, "cleared": count}
 
 
+@app.post("/api/open-storage")
+def api_open_storage():
+    root = resolve_storage(load_global()["storage_dir"])
+    if not root.exists():
+        return JSONResponse({"detail": f"{root} does not exist yet. It is created when the first job runs"}, status_code=400)
+    opener = "open" if sys.platform == "darwin" else shutil.which("xdg-open")
+    if not opener:
+        return JSONResponse({"detail": "No file browser is available on this machine"}, status_code=400)
+    try:
+        subprocess.Popen([opener, str(root)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as e:
+        return JSONResponse({"detail": f"Could not open the folder: {e}"}, status_code=400)
+    return {"ok": True}
+
+
 @app.get("/api/trending")
 def api_trending():
     try:
