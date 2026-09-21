@@ -48,7 +48,7 @@ REVIEW_MODES = ("advisory", "block", "off")
 ENGINES = ("local", "veo")
 TTS_ENGINES = ("auto", "kokoro", "piper", "say", "espeak")
 SUGGESTED_TEXT_MODELS = ["llama3.1:8b", "llama3.2:3b", "qwen2.5:7b", "mistral:7b"]
-SUGGESTED_VISION_MODELS = ["moondream", "llava:7b", "llama3.2-vision", "qwen2.5vl:7b"]
+SUGGESTED_VISION_MODELS = ["llava:7b", "qwen2.5vl:7b", "llama3.2-vision", "moondream"]
 SMALL_VISION_MODELS = ("moondream", "llava-phi3", "bakllava")
 
 GLOBAL_DEFAULTS = {
@@ -61,7 +61,7 @@ GLOBAL_DEFAULTS = {
     "video_engine": "local",
     "ollama_url": "http://localhost:11434",
     "ollama_model": "llama3.1:8b",
-    "vision_model": "moondream",
+    "vision_model": "llava:7b",
     "ollama_timeout": 300,
     "sd_model": "stabilityai/sdxl-turbo",
     "sd_steps": 4,
@@ -1129,6 +1129,9 @@ def unload_pipeline():
         logger.debug("Released image model from memory")
 
 
+INCONCLUSIVE = ("don't know", "do not know", "not sure", "cannot", "can't", "unable", "no image", "what you see", "short explanation")
+
+
 def kids_vision_check(s, clip_path):
     model = s["vision_model"].strip()
     if not model:
@@ -1142,30 +1145,35 @@ def kids_vision_check(s, clip_path):
         raise RuntimeError("Could not extract a frame for the vision check")
     images = [base64.b64encode(frame.read_bytes()).decode()]
     frame.unlink(missing_ok=True)
-    if not model.split(":")[0] in SMALL_VISION_MODELS:
-        unload_pipeline()
-    safe, reason = True, ""
+    verdict, detail = None, ""
     try:
         try:
-            data = ollama_call(s, KIDS_VISION_PROMPT, temperature=0.1, model=model, images=images, num_predict=256)
-            desc = str(data.get("description", ""))
-            reason = str(data.get("reason", ""))
-            echoed = "it is unsafe if" in reason.lower() or reason.strip().lower() in ("why", "short explanation")
-            if echoed or desc.strip().lower() in ("what you see", "description"):
-                raise ValueError("model echoed the prompt")
-            safe = truthy(data.get("safe"))
+            data = ollama_call(s, KIDS_VISION_PROMPT, temperature=0.1, model=model, images=images, num_predict=300)
+            desc = str(data.get("description", "")).strip()
+            reason = str(data.get("reason", "")).strip()
+            low = f"{desc} {reason}".lower()
+            echoed = "it is unsafe if" in low
+            if desc and not echoed and not any(x in low for x in INCONCLUSIVE) and "safe" in data:
+                verdict = truthy(data.get("safe"))
+                detail = f"{desc} | {reason}"
         except (requests.exceptions.HTTPError, ValueError):
-            text = ollama_call(s, VISION_TEXT_PROMPT, temperature=0.1, model=model, images=images, num_predict=128, as_json=False)
+            pass
+        if verdict is None:
+            text = ollama_call(s, VISION_TEXT_PROMPT, temperature=0.1, model=model, images=images, num_predict=150, as_json=False).strip()
             low = text.lower()
-            safe = "unsafe" not in low
-            reason = text.strip()[:200]
+            if low.startswith("unsafe") or re.search(r"\bunsafe\b", low):
+                verdict, detail = False, text
+            elif re.match(r"^\W*safe\b", low) and not any(x in low for x in INCONCLUSIVE):
+                verdict, detail = True, text
     except Cancelled:
         raise
     except Exception as e:
         raise VisionUnavailable(f"vision model '{model}' could not run: {e}") from e
-    if not safe:
-        raise ValueError(f"Vision check rejected {clip_path.name}: {reason or 'no reason given'}")
-    logger.info("Vision check passed for %s", clip_path.name)
+    if verdict is None:
+        raise VisionUnavailable(f"vision model '{model}' gave no clear answer, try llava:7b")
+    if not verdict:
+        raise ValueError(f"Vision check rejected {clip_path.name}: {detail[:200] or 'no reason given'}")
+    logger.info("Vision check passed for %s: %s", clip_path.name, detail[:160])
 
 
 def load_pipeline(s):
@@ -1497,16 +1505,18 @@ def run_job(s):
         extras = []
         vision_log = []
         n = len(script["scenes"])
-        for i, scene in enumerate(script["scenes"], 1):
-            check()
-            set_stage(f"generating scene {i}/{n}", step=3 + (i - 1) * 2)
-            path = job_dir / f"clip_{i:02d}.mp4"
+
+        def build_scene(i, scene, path):
             for attempt in range(1, 4):
+                check()
                 try:
                     if engine == "local":
                         extra = make_clip_local(s, scene, script, path, kids)
                     else:
                         extra = make_clip_veo(s, scene, script, path, kids)
+                    if extra and extra not in extras:
+                        extras.append(extra)
+                    return
                 except Cancelled:
                     raise
                 except Exception as e:
@@ -1515,32 +1525,45 @@ def run_job(s):
                     if attempt == 3:
                         raise
                     stop_event.wait(10)
-                    continue
-                if kids:
-                    set_stage(f"vision check scene {i}/{n}", step=4 + (i - 1) * 2)
+
+        for i, scene in enumerate(script["scenes"], 1):
+            set_stage(f"generating scene {i}/{n}", step=2 + i)
+            path = job_dir / f"clip_{i:02d}.mp4"
+            build_scene(i, scene, path)
+            clips.append(path)
+
+        if kids:
+            pending = list(range(1, n + 1))
+            for rnd in range(1, 4):
+                unload_pipeline()
+                rejected = []
+                for i in pending:
+                    check()
+                    set_stage(f"vision check scene {i}/{n}", step=2 + n + i)
                     try:
-                        kids_vision_check(s, path)
-                        vision_log.append({"clip": i, "attempt": attempt, "result": "passed"})
+                        kids_vision_check(s, clips[i - 1])
+                        vision_log.append({"clip": i, "round": rnd, "result": "passed"})
                     except Cancelled:
                         raise
                     except VisionUnavailable as e:
                         if s["kids_manual_review"]:
                             logger.warning("Scene %d: %s. Continuing, check this video manually before publishing", i, e)
-                            vision_log.append({"clip": i, "attempt": attempt, "result": f"skipped: {e}"[:300]})
+                            vision_log.append({"clip": i, "round": rnd, "result": f"skipped: {e}"[:300]})
                         else:
-                            raise RuntimeError(f"{e}. Turn on manual review or pick a working vision model")
+                            raise RuntimeError(f"{e}. Frames were not verified, so nothing was uploaded")
                     except Exception as e:
-                        logger.warning("Scene %d attempt %d rejected: %s", i, attempt, e)
-                        vision_log.append({"clip": i, "attempt": attempt, "result": str(e)[:300]})
-                        path.unlink(missing_ok=True)
-                        if attempt == 3:
-                            raise
-                        stop_event.wait(5)
-                        continue
-                if extra:
-                    extras.append(extra)
-                break
-            clips.append(path)
+                        logger.warning("Scene %d rejected (round %d): %s", i, rnd, e)
+                        vision_log.append({"clip": i, "round": rnd, "result": str(e)[:300]})
+                        rejected.append(i)
+                if not rejected:
+                    break
+                if rnd == 3:
+                    raise RuntimeError(f"Scenes {rejected} still failed the vision check after 3 rounds")
+                for i in rejected:
+                    set_stage(f"regenerating scene {i}/{n}", step=2 + i)
+                    clips[i - 1].unlink(missing_ok=True)
+                    build_scene(i, script["scenes"][i - 1], clips[i - 1])
+                pending = rejected
         if kids:
             compliance["vision_checks"] = vision_log
         set_stage("stitching video", step=3 + n * 2)
