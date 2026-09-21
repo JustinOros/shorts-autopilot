@@ -195,7 +195,8 @@ else if(type==="days"){const on=new Set(String(s[k]||"").split(","));input=`<div
 else if(type.startsWith("time")){const cur=String(s[k]||"");const opts=(type==="time:opt"?[["","None"]]:[]).concat(TIMES);if(cur&&!opts.some(([v])=>v===cur))opts.push([cur,cur]);input=`<select id="f-${k}">${opts.map(([v,l])=>`<option value="${esc(v)}" ${cur===v?"selected":""}>${esc(l)}</option>`).join("")}</select>`}
 else if(type.startsWith("model:")){
 const kind=type.slice(6);
-const installed=data.installed_models||[];
+const allInstalled=data.installed_models||[];const vis=new Set(data.installed_vision_models||[]);
+const installed=kind==="vision"?allInstalled.filter(m=>vis.has(m)):allInstalled.filter(m=>!vis.has(m));
 const suggested=(kind==="vision"?data.suggested_vision_models:data.suggested_text_models)||[];
 const cur=String(s[k]||"");
 const seen=new Set();

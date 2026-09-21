@@ -829,6 +829,31 @@ def ollama_tags(s):
         return []
 
 
+_caps_cache = {}
+
+
+def ollama_caps(s, model):
+    if model in _caps_cache:
+        return _caps_cache[model]
+    try:
+        r = requests.post(f"{s['ollama_url'].rstrip('/')}/api/show", json={"model": model}, timeout=10)
+        if r.status_code != 200:
+            return None
+        caps = set(r.json().get("capabilities") or [])
+    except Exception:
+        return None
+    _caps_cache[model] = caps
+    return caps
+
+
+def is_vision_model(s, model):
+    caps = ollama_caps(s, model)
+    if caps is None:
+        base = model.split(":")[0].lower()
+        return any(k in base for k in ("vl", "vision", "llava", "moondream", "bakllava", "minicpm-v", "gemma3"))
+    return "vision" in caps
+
+
 def ollama_has(s, model):
     installed = ollama_tags(s)
     return model in installed or f"{model}:latest" in installed
@@ -899,6 +924,10 @@ def ensure_models(s, engine):
         if m and not ollama_has(s, m):
             set_stage(f"downloading model {m}")
             ollama_pull(s, m)
+    if s["made_for_kids"]:
+        vm = s["vision_model"].strip()
+        if vm and not is_vision_model(s, vm):
+            raise RuntimeError(f"'{vm}' is a text model and cannot check images. Pick a vision model such as qwen2.5vl:7b in Settings")
 
 
 def ollama_call(s, prompt, temperature=0.9, model=None, images=None, num_predict=2048, as_json=True):
@@ -1858,6 +1887,7 @@ def get_settings():
         "models_resolved": str(resolve_sub(g, "models_dir", "models")),
         "temp_resolved": str(resolve_sub(g, "temp_dir", "tmp")),
         "installed_models": ollama_tags(g),
+        "installed_vision_models": [m for m in ollama_tags(g) if is_vision_model(g, m)],
         "suggested_text_models": SUGGESTED_TEXT_MODELS,
         "suggested_vision_models": SUGGESTED_VISION_MODELS,
     }
