@@ -85,7 +85,6 @@ h2,h3{font-family:var(--font-display);letter-spacing:-.01em;margin:0}
 .stage{font-family:var(--font-display);font-weight:700;font-size:28px;line-height:1.15;letter-spacing:-.015em;margin:0;overflow-wrap:anywhere}
 .stage::first-letter{text-transform:uppercase}
 .chip{display:inline-flex;align-items:center;gap:6px;padding:3px 10px;border-radius:999px;font-size:12.5px;font-weight:700;background:color-mix(in srgb,var(--c,var(--muted)) 16%,transparent);color:var(--c,var(--muted));white-space:nowrap}
-.chip.kids{--c:var(--violet)}
 .progress{margin-top:16px;display:none}
 .progress.show{display:block}
 .segs{display:flex;gap:4px;height:10px}
@@ -213,7 +212,7 @@ main{padding:20px 16px 120px}
 <div class="console">
 <button id="go" class="go" aria-live="polite">GO</button>
 <div class="state">
-<div class="state-line"><p class="stage" id="st-stage">Idle</p><span class="chip kids" id="kids-badge" hidden>Made for kids checks on</span></div>
+<div class="state-line"><p class="stage" id="st-stage">Idle</p></div>
 <div class="progress" id="progress"><div class="segs" id="pg-segs"></div><div class="pg-meta" id="pg-meta"></div></div>
 <div class="idle-note" id="idle-note">Press GO to start making videos for the active profile.</div>
 </div>
@@ -444,7 +443,6 @@ $("#st-channel").textContent=s.channel||"Not linked";
 const free=$("#st-free");free.textContent=s.storage_free_gb===null?"Folder not created":s.storage_free_gb.toLocaleString()+" GB";free.classList.toggle("warn",s.storage_free_gb!==null&&s.storage_free_gb<10);
 $("#st-after").textContent=s.delete_after_publish?"Delete files":"Move to published";
 $("#st-storage").textContent=s.storage?"Videos are stored in "+s.storage:"";
-$("#kids-badge").hidden=!s.made_for_kids;
 const pg=$("#progress");const note=$("#idle-note");
 if(s.steps>0&&(s.running||s.step<s.steps)){
 pg.classList.add("show");note.hidden=true;
