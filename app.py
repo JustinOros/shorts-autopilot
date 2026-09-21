@@ -454,12 +454,33 @@ def apply_paths(s):
     return models, temp
 
 
+def sweep_temp(temp, max_age_hours=1):
+    cutoff = datetime.now().timestamp() - max_age_hours * 3600
+    removed = 0
+    for item in temp.iterdir():
+        if item.name.startswith("torchinductor_") or item.name.startswith(".write_test"):
+            continue
+        try:
+            if item.lstat().st_mtime > cutoff:
+                continue
+            if item.is_dir() and not item.is_symlink():
+                shutil.rmtree(item, ignore_errors=True)
+            else:
+                item.unlink(missing_ok=True)
+            removed += 1
+        except OSError:
+            continue
+    if removed:
+        logger.info("Cleaned %d old items from the temp folder", removed)
+
+
 def prepare_storage(s):
     root = validate_storage(s["storage_dir"])
     free = free_gb(root)
     if free is not None and free < MIN_FREE_GB:
         raise RuntimeError(f"Only {free:.1f} GB free at {root}, need at least {MIN_FREE_GB} GB")
     models, temp = apply_paths(s)
+    sweep_temp(temp)
     logger.info("Storage: %s (%.1f GB free) | Models: %s | Temp: %s", root, free or 0, models, temp)
 
 
