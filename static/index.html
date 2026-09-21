@@ -461,14 +461,15 @@ return `<tr><td class="nowrap">${esc(fmtStart(h.started))}</td><td class="nowrap
 $("#jobs").innerHTML=`<thead><tr><th>Started</th><th>Time</th><th>Video</th><th>Inspired by</th><th>Status</th><th></th></tr></thead><tbody>${rows||`<tr><td colspan="6" class="empty">No jobs yet. Press GO and finished videos will show up here.</td></tr>`}</tbody>`;
 }catch(e){}}
 
-let since=0;
+let since=0,polling=false;
 async function pollLogs(){
+if(polling)return;polling=true;
 try{
 const r=await api("/api/logs?since="+since);const box=$("#log");
-for(const [seq,level,line] of r.lines){const d=document.createElement("div");d.className=level;d.textContent=line;box.appendChild(d);since=seq}
+for(const [seq,level,line] of r.lines){if(seq<=since)continue;const d=document.createElement("div");d.className=level;d.textContent=line;box.appendChild(d);since=seq}
 while(box.childElementCount>3000)box.firstChild.remove();
 if(r.lines.length&&$("#autoscroll").checked)box.scrollTop=box.scrollHeight
-}catch(e){}}
+}catch(e){}finally{polling=false}}
 
 document.querySelectorAll(".prof-select").forEach(sel=>sel.onchange=e=>activate(e.target.value));
 $("#new-profile").onclick=async()=>{

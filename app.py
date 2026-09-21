@@ -1057,6 +1057,8 @@ def is_english_word(w, extra):
         return True
     if w in vocab:
         return True
+    if re.fullmatch(r"[a-z]{4,}(tion|sion|ment|ness|ity|ship|able|ible|ful|less|ous|ive|ize|ise)", w):
+        return True
     for suffix in ("s", "es", "'s", "ers", "er", "ing", "ed", "ies", "ly"):
         if w.endswith(suffix) and len(w) > len(suffix) + 2:
             stem = w[: -len(suffix)]
@@ -1280,13 +1282,31 @@ INCONCLUSIVE = ("don't know", "do not know", "not sure", "cannot", "can't", "una
 
 
 VISION_QUESTIONS = [
-    ("extra ears", "Look closely at every animal and character. Does any single animal or character have more than two ears? Answer only yes or no."),
-    ("extra eyes", "Does any single animal or character have more than two eyes? Answer only yes or no."),
-    ("extra heads", "Does any single animal or character have more than one head, or are two bodies merged together? Answer only yes or no."),
-    ("extra limbs", "Count the legs and arms on each animal and character. Does any of them have more legs or arms than that kind of creature should have? Answer only yes or no."),
-    ("realistic person", "Is there a realistic, photograph-like human being in this image, rather than a cartoon? Answer only yes or no."),
-    ("unsuitable", "Is there anything scary, violent, creepy, or inappropriate for a 4 year old child in this image? Answer only yes or no."),
+    ("extra ears", "anatomy",
+     "Look closely at every animal and character. Does any single animal or character have more than two ears? Answer only yes or no.",
+     "Count the ears on each animal one at a time. Is there any single animal with three or more ears? Answer only yes or no."),
+    ("extra eyes", "anatomy",
+     "Does any single animal or character have more than two eyes? Answer only yes or no.",
+     "Count the eyes on each face one at a time. Is there any single face with three or more eyes? Answer only yes or no."),
+    ("extra heads", "anatomy",
+     "Does any single animal or character have more than one head, or are two bodies merged together? Answer only yes or no.",
+     "Is there any single body in this image with two heads attached to it? Answer only yes or no."),
+    ("extra limbs", "anatomy",
+     "Count the legs and arms on each animal and character. Does any of them have more legs or arms than that kind of creature should have? Answer only yes or no.",
+     "Is there any creature with an extra leg or arm that clearly should not be there? Answer only yes or no."),
+    ("realistic person", "safety",
+     "Is there a realistic, photograph-like human being in this image, rather than a cartoon? Answer only yes or no.",
+     "Does any person in this image look like a real photograph rather than a drawing? Answer only yes or no."),
+    ("unsuitable", "safety",
+     "Is there anything scary, violent, creepy, or inappropriate for a 4 year old child in this image? Answer only yes or no.",
+     "Would a parent be upset to see this image in a video for small children? Answer only yes or no."),
 ]
+
+
+class VisionReject(ValueError):
+    def __init__(self, message, safety):
+        super().__init__(message)
+        self.safety = safety
 
 
 def vision_image(s, clip_path):
@@ -1327,24 +1347,35 @@ def kids_vision_check(s, clip_path):
     unclear = []
     try:
         desc = ollama_call(s, "Describe this image in one short sentence.", temperature=0.1, model=model, images=images, num_predict=80, as_json=False).strip()
-        for key, question in VISION_QUESTIONS:
-            check()
-            answer = None
+        def ask(q):
             for _ in range(2):
-                reply = ollama_call(s, question, temperature=0.0, model=model, images=images, num_predict=10, as_json=False)
-                answer = yes_no(reply)
-                if answer is not None:
-                    break
+                a = yes_no(ollama_call(s, q, temperature=0.0, model=model, images=images, num_predict=10, as_json=False))
+                if a is not None:
+                    return a
+            return None
+
+        for key, kind, question, confirm in VISION_QUESTIONS:
+            check()
+            answer = ask(question)
+            if answer:
+                second = ask(confirm)
+                if second is False:
+                    logger.debug("Ignored '%s' for %s, the confirming question disagreed", key, clip_path.name)
+                    answer = False
+                elif second is None:
+                    answer = None
             if answer is None:
                 unclear.append(key)
             elif answer:
-                problems.append(key)
+                problems.append((key, kind))
     except Cancelled:
         raise
     except Exception as e:
         raise VisionUnavailable(f"vision model '{model}' could not run: {e}") from e
     if problems:
-        raise ValueError(f"Vision check rejected {clip_path.name}: {', '.join(problems)} ({desc[:120]})")
+        safety = any(kind == "safety" for _, kind in problems)
+        names = ", ".join(k for k, _ in problems)
+        raise VisionReject(f"Vision check rejected {clip_path.name}: {names} ({desc[:120]})", safety)
     if unclear:
         raise VisionUnavailable(f"vision model '{model}' gave no clear answer about {', '.join(unclear)}")
     logger.info("Vision check passed for %s: %s", clip_path.name, desc[:160])
@@ -1722,6 +1753,8 @@ def run_job(s):
             build_scene(i, scene, path)
             clips.append(path)
 
+        anatomy_note = ""
+        safety_hits = set()
         if kids:
             pending = list(range(1, n + 1))
             for rnd in range(1, 4):
@@ -1745,10 +1778,20 @@ def run_job(s):
                         logger.warning("Scene %d rejected (round %d): %s", i, rnd, e)
                         vision_log.append({"clip": i, "round": rnd, "result": str(e)[:300]})
                         rejected.append(i)
+                        if getattr(e, "safety", True):
+                            safety_hits.add(i)
+                        else:
+                            safety_hits.discard(i)
                 if not rejected:
                     break
                 if rnd == 3:
-                    raise RuntimeError(f"Scenes {rejected} still failed the vision check after 3 rounds")
+                    unsafe = [i for i in rejected if i in safety_hits]
+                    if unsafe:
+                        raise RuntimeError(f"Scenes {unsafe} still failed the safety check after 3 rounds")
+                    flagged = ", ".join(str(i) for i in rejected)
+                    logger.warning("Scenes %s may still have anatomy glitches after 3 redraws, keeping them. Check them before publishing", flagged)
+                    anatomy_note = f"Possible anatomy glitches kept in scenes {flagged}"
+                    break
                 for i in rejected:
                     set_stage(f"regenerating scene {i}/{n}", step=2 + i)
                     clips[i - 1].unlink(missing_ok=True)
@@ -1756,6 +1799,10 @@ def run_job(s):
                 pending = rejected
         if kids:
             compliance["vision_checks"] = vision_log
+            if anatomy_note:
+                compliance["anatomy_note"] = anatomy_note
+                prior = "; ".join(compliance.get("reviewer_notes", []))
+                update_history(job_id, notes=(prior + "; " if prior else "") + anatomy_note)
         set_stage("stitching video", step=3 + n * 2)
         final = job_dir / "final.mp4"
         concat_clips(clips, final, s["aspect_ratio"])
