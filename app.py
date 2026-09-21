@@ -87,6 +87,7 @@ PROFILE_DEFAULTS = {
     "made_for_kids": False,
     "kids_manual_review": True,
     "kids_llm_review": "advisory",
+    "ai_disclosure": True,
     "upload_category_id": "24",
     "privacy_status": "private",
     "trending_query": "",
@@ -1328,10 +1329,13 @@ def upload_video(s, path, script, tags):
         "status": {
             "privacyStatus": privacy,
             "selfDeclaredMadeForKids": kids,
-            "containsSyntheticMedia": True,
+            "containsSyntheticMedia": bool(s["ai_disclosure"]),
         },
     }
-    logger.info("Uploading to %s as category %s, made for kids: %s", profile_channel(s["profile_id"]), body["snippet"]["categoryId"], kids)
+    logger.info(
+        "Uploading to %s as category %s, made for kids: %s, AI disclosure: %s",
+        profile_channel(s["profile_id"]), body["snippet"]["categoryId"], kids, bool(s["ai_disclosure"]),
+    )
     media = MediaFileUpload(str(path), mimetype="video/mp4", resumable=True, chunksize=8 * 1024 * 1024)
     req = yt.videos().insert(part="snippet,status", body=body, media_body=media)
     resp = None
@@ -1465,7 +1469,7 @@ def run_job(s):
         set_stage("uploading to YouTube", step=4 + n * 2)
         vid, held = upload_video(s, final, script, tags)
         compliance["made_for_kids_flag"] = kids
-        compliance["synthetic_media_flag"] = True
+        compliance["synthetic_media_flag"] = bool(s["ai_disclosure"])
         compliance["held_for_review"] = held
         compliance["youtube_id"] = vid
         with state_lock:
