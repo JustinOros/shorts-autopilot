@@ -684,6 +684,49 @@ def record_slot(pid, iso):
         save_state(st)
 
 
+def recent_stories(pid):
+    return load_state().get("stories", {}).get(pid, [])
+
+
+def remember_story(pid, script):
+    names = re.findall(r"\b([A-Z][a-z]{2,})\b", script.get("characters", ""))
+    stop = {"The", "His", "Her", "Their", "With", "And", "Who", "She", "They", "This", "That", "Mr", "Mrs", "Miss"}
+    names = [n for n in dict.fromkeys(names) if n not in stop][:6]
+    with state_lock:
+        st = load_state()
+        lst = st.setdefault("stories", {}).setdefault(pid, [])
+        lst.append({"title": script["title"], "names": names})
+        st["stories"][pid] = lst[-50:]
+        save_state(st)
+
+
+def channel_titles(s):
+    try:
+        yt = youtube_client(s["profile_id"])
+        ch = yt.channels().list(part="contentDetails", mine=True).execute().get("items", [])
+        if not ch:
+            return []
+        uploads = ch[0]["contentDetails"]["relatedPlaylists"]["uploads"]
+        items = yt.playlistItems().list(part="snippet", playlistId=uploads, maxResults=50).execute().get("items", [])
+        titles = [re.sub(r"\s*#shorts\b", "", i["snippet"]["title"], flags=re.I).strip() for i in items]
+        return [x for x in titles if x]
+    except Exception as e:
+        logger.warning("Could not read existing channel titles: %s", e)
+        return []
+
+
+def past_stories(s):
+    past = list(recent_stories(s["profile_id"]))
+    for title in s.get("_channel_titles", []):
+        names = re.findall(r"\b([A-Z][a-z]{2,})'s\b", title)
+        past.append({"title": title, "names": names})
+    return past
+
+
+def norm_title(t):
+    return re.sub(r"[^a-z0-9 ]", "", str(t).lower()).strip()
+
+
 def load_state():
     with state_lock:
         st = read_json(STATE_FILE, {})
@@ -983,13 +1026,23 @@ def write_script(s, src, feedback=None):
         "A previous draft was rejected for these problems. Do not repeat them:\n" + "\n".join(f"- {f}" for f in feedback) + "\n"
         if feedback else ""
     )
+    past = past_stories(s)
+    used_titles = list(dict.fromkeys(x["title"] for x in past))[-40:]
+    used_names = sorted({n for x in past for n in x.get("names", [])})
+    avoid_block = ""
+    if used_titles or used_names:
+        avoid_block = "This channel has already published stories. Make this one feel new.\n"
+        if used_titles:
+            avoid_block += "Do not reuse or closely copy any of these titles: " + "; ".join(used_titles) + "\n"
+        if used_names:
+            avoid_block += "Do not use any of these character names: " + ", ".join(used_names) + ". Invent fresh names.\n"
     prompt = f"""You are a short-form video writer. This video is currently popular on YouTube:
 Title: {src['title']}
 Channel: {src['channel']}
 Description: {src['description']}
 Tags: {', '.join(src['tags'])}
 
-{niche_block}{kids_block}{feedback_block}
+{niche_block}{kids_block}{feedback_block}{avoid_block}
 Identify the underlying topic and why it appeals to viewers. Then write a completely ORIGINAL {n * clip}-second YouTube Short in English.
 Do not reuse the source's title, script, characters, jokes, branding, or channel identity.
 Do not depict real people, celebrities, brands, logos, or copyrighted characters. Invent new characters.
@@ -1018,6 +1071,8 @@ Return JSON only in this shape:
                 raise ValueError(f"expected {n} scenes, got {len(scenes)}")
             if not str(data.get("title", "")).strip():
                 raise ValueError("missing title")
+            if norm_title(data["title"]) in {norm_title(x["title"]) for x in past_stories(s)}:
+                raise ValueError(f"title '{data['title']}' was already used on this channel")
             data["scenes"] = [{"visual": str(sc.get("visual", "")), "narration": str(sc.get("narration", ""))} for sc in scenes[:n]]
             data["title"] = str(data["title"])
             data["style"] = str(data.get("style", ""))
@@ -1723,7 +1778,11 @@ def run_job(s):
     compliance = {}
     finalized = False
     try:
+        s["_channel_titles"] = channel_titles(s)
+        if s["_channel_titles"]:
+            logger.info("Loaded %d existing channel titles to avoid repeats", len(s["_channel_titles"]))
         script, tags, compliance = produce_script(s, src)
+        remember_story(s["profile_id"], script)
         compliance["engine"] = engine
         update_history(job_id, title=script["title"], notes="; ".join(compliance.get("reviewer_notes", []))[:400])
         write_json(job_dir / "script.json", {"profile": s["name"], "source": src, "script": script, "tags": tags})
