@@ -175,7 +175,10 @@ input:disabled,select:disabled{opacity:.55}
 #log .ERROR,#log .CRITICAL{color:var(--coral)}
 #log .WARNING{color:var(--amber)}
 #log .DEBUG{color:var(--faint)}
-.trend{margin-top:12px}
+.tools{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin:0 0 22px}
+.tools .status{font-size:14px;color:var(--muted)}
+#trending-panel{margin:0 0 24px}
+#trending-panel .table-wrap{max-height:420px;overflow:auto}
 
 @media (max-width:860px){
 .topbar{padding:10px 16px;gap:12px}
@@ -228,16 +231,10 @@ main{padding:20px 16px 120px}
 <div class="section-head">
 <h2>Jobs</h2>
 <div class="actions">
-<button class="btn sm" id="link">Link YouTube channel</button>
-<button class="btn sm" id="preview">Preview trending videos</button>
 <button class="btn sm quiet" id="clear-jobs">Clear list</button>
 </div>
 </div>
 <div class="table-wrap"><table id="jobs"></table></div>
-<div id="trending-panel" hidden>
-<div class="section-head"><h2>Trending right now</h2><span class="muted small" id="preview-msg"></span></div>
-<div class="table-wrap"><table id="trending"></table></div>
-</div>
 <p class="muted small" id="st-storage" style="margin-top:18px"></p>
 </section>
 <section id="settings" class="tab">
@@ -365,7 +362,7 @@ if(cur&&!seen.has(cur))opts.unshift(`<option value="${esc(cur)}" selected>${esc(
 return `<select id="f-${k}">${opts.join("")}</select>`}
 return `<input type="${type==="wide"?"text":type}" id="f-${k}" value="${esc(s[k])}">`}
 
-let spy=null;
+let spy=null;let lastChannel="";
 async function loadSettings(){
 const data=await api("/api/settings");
 renderProfiles(data.profiles,data.active);
@@ -377,6 +374,7 @@ if(type==="header"){
 n++;const sec=document.createElement("section");sec.className="group";sec.id="sec-"+n;
 sec.innerHTML=`<h3>${esc(label)}</h3>${hint?`<p class="desc">${esc(hint)}</p>`:""}<div class="fields"></div>`;
 root.appendChild(sec);grid=sec.querySelector(".fields");
+if(n===1){const tools=document.createElement("div");tools.innerHTML=`<div class="tools"><button class="btn sm" id="link">${lastChannel?"Unlink YouTube channel":"Link YouTube channel"}</button><button class="btn sm" id="preview">Preview trending videos</button><span class="status" id="link-status">${lastChannel?"Linked to "+esc(lastChannel):"No channel linked yet"}</span></div><div id="trending-panel" hidden><div class="section-head" style="margin:0 0 10px"><h3 style="font-size:16px">Trending for this profile's search</h3><span class="muted small" id="preview-msg"></span></div><div class="table-wrap"><table id="trending"></table></div></div>`;sec.insertBefore(tools,grid);$("#link").onclick=linkClick;$("#preview").onclick=previewClick}
 const a=document.createElement("a");a.href="#sec-"+n;a.textContent=label;a.dataset.sec="sec-"+n;
 a.onclick=e=>{e.preventDefault();sec.scrollIntoView({behavior:matchMedia("(prefers-reduced-motion: reduce)").matches?"auto":"smooth",block:"start"})};
 nav.appendChild(a);continue}
@@ -451,7 +449,7 @@ const segs=$("#pg-segs");if(segs.childElementCount!==s.steps){segs.innerHTML="<i
 const pct=Math.min(100,Math.round(s.step*100/s.steps));
 $("#pg-meta").textContent=`Step ${s.step} of ${s.steps}, ${pct}% done`+(s.elapsed?`, running for ${fmtDur(s.elapsed)}`:"");
 }else{pg.classList.remove("show");note.hidden=false;note.textContent=s.running?"Waiting for the next video to start.":"Press GO to start making videos for the active profile."}
-const lb=$("#link");lb.textContent=s.channel?"Unlink YouTube channel":"Link YouTube channel";lb.dataset.linked=s.channel?"1":"";
+lastChannel=s.channel||"";const lb=$("#link");if(lb){lb.textContent=s.channel?"Unlink YouTube channel":"Link YouTube channel"}const ls=$("#link-status");if(ls){ls.textContent=s.channel?"Linked to "+s.channel:"No channel linked yet"}
 setButton(s.running);
 const dur=h=>{if(!h.started_ts)return"";const end=h.finished_ts||(h.status==="running"?s.now:0);return end?fmtDur(end-h.started_ts):""};
 const rows=s.history.map(h=>{
@@ -494,11 +492,11 @@ try{await api(running?"/api/stop":"/api/start",{method:"POST"})}catch(e){alert(e
 b.dataset.busy="";b.classList.remove("busy");
 setButton(!running);
 refresh()};
-$("#link").onclick=async()=>{
-if($("#link").dataset.linked==="1"){
+async function linkClick(){
+if(lastChannel){
 if(!confirm("Unlink the YouTube channel from this profile?"))return;
-await api("/auth/unlink",{method:"POST"});await loadSettings();refresh()}
-else{window.location.href="/auth/start"}};
+await api("/auth/unlink",{method:"POST"});lastChannel="";await loadSettings();refresh()}
+else{window.location.href="/auth/start"}}
 $("#save").onclick=saveSettings;
 $("#clear").onclick=()=>{$("#log").innerHTML=""};
 $("#copy-log").onclick=async()=>{
@@ -511,7 +509,7 @@ $("#clear-jobs").onclick=async()=>{
 const b=$("#clear-jobs");if(b.disabled)return;b.disabled=true;
 try{await api("/api/history/clear",{method:"POST"});await refresh()}catch(e){alert(e.message)}
 b.disabled=false};
-$("#preview").onclick=async()=>{
+async function previewClick(){
 const panel=$("#trending-panel");const m=$("#preview-msg");const b=$("#preview");
 panel.hidden=false;m.textContent="Loading";b.disabled=true;
 try{
@@ -519,7 +517,7 @@ const r=await api("/api/trending");
 $("#trending").innerHTML=`<thead><tr><th>Views</th><th>Title</th><th>Channel</th></tr></thead><tbody>${r.items.map(v=>`<tr><td class="nowrap">${v.views.toLocaleString()}</td><td class="source"><a target="_blank" rel="noopener" href="https://youtube.com/watch?v=${esc(v.id)}">${esc(v.title)}</a></td><td>${esc(v.channel)}</td></tr>`).join("")||`<tr><td colspan="3" class="empty">No videos matched the current search settings.</td></tr>`}</tbody>`;
 m.textContent=r.items.length+" videos";
 }catch(e){m.textContent=e.message}
-b.disabled=false};
+b.disabled=false}
 
 let startTab="dash";try{const t=localStorage.getItem("sa-tab");if(["dash","settings","logs"].includes(t))startTab=t}catch(e){}
 showTab(startTab);
