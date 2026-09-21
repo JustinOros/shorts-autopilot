@@ -79,6 +79,7 @@ GLOBAL_DEFAULTS = {
     "aspect_ratio": "9:16",
     "target_seconds": 60,
     "clip_seconds": 8,
+    "scene_timing": "narration",
     "error_cooldown_minutes": 5,
     "work_hours_enabled": False,
     "work_days": "mon,tue,wed,thu,fri,sat,sun",
@@ -998,7 +999,7 @@ Every character is a cartoon: a cartoon animal, a cartoon creature, or a simple 
 
 The Short has exactly {n} scenes of {clip} seconds each. Each scene has:
 "visual": a detailed, self-contained shot description of one still image (setting, action, mood, lighting). Name the characters but do not re-describe their appearance, that comes from "characters". Never mention on-screen text or words.
-"narration": one spoken line of at most {words} words.
+"narration": one spoken line of {max(4, words - 5)} to {words} words, so it fills most of the scene.
 
 Scene 1 must hook the viewer in the first 2 seconds. The final scene must deliver a payoff.
 
@@ -1494,7 +1495,11 @@ def media_duration(path):
 
 def render_scene(s, image, audio, out, aspect):
     w, h = (1080, 1920) if aspect == "9:16" else (1920, 1080)
-    dur = max(float(s["clip_seconds"]), media_duration(audio) + 0.6)
+    spoken = media_duration(audio)
+    if s.get("scene_timing", "narration") == "fixed":
+        dur = max(float(s["clip_seconds"]), spoken + 0.6)
+    else:
+        dur = max(2.5, spoken + 0.8)
     frames = int(dur * 30)
     vf = (
         f"[0:v]scale={w * 2}:{h * 2}:force_original_aspect_ratio=increase,crop={w * 2}:{h * 2},"

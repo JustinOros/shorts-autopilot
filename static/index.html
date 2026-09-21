@@ -326,7 +326,8 @@ const FIELDS=[
 ["ollama_timeout","Ollama timeout (seconds)","select:120|300|600|900","Max wait per Ollama request before retrying","g"],
 ["aspect_ratio","Aspect ratio","select:9:16|16:9","","g"],
 ["target_seconds","Target length (seconds)","select:30|45|60|90|120|180","Split into scenes of the length below","g"],
-["clip_seconds","Seconds per scene","select:5|6|8|10|12","8 gives 7 scenes in a 60 second Short","g"],
+["clip_seconds","Seconds per scene","select:5|6|8|10|12","Sets how many scenes the story has and how long each narration line is. 8 gives 7 scenes","g"],
+["scene_timing","Scene timing","select:narration=Match the narration|fixed=Fixed length per scene","Match the narration moves to the next scene shortly after the voice finishes","g"],
 ["error_cooldown_minutes","Wait after error (minutes)","select:1|5|10|15|30|60","","g"]
 ];
 const DAYS=[["mon","Mon"],["tue","Tue"],["wed","Wed"],["thu","Thu"],["fri","Fri"],["sat","Sat"],["sun","Sun"]];
