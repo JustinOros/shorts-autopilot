@@ -1483,6 +1483,7 @@ def run_job(s):
             "job_id": job_id,
             "profile": s["name"],
             "started": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "started_ts": int(datetime.now().timestamp()),
             "source_id": src["id"],
             "source_title": src["title"],
             "status": "running",
@@ -1589,14 +1590,14 @@ def run_job(s):
                 c.unlink(missing_ok=True)
         set_stage("moving files")
         location = finish_files(s, job_dir, job_id)
-        update_history(job_id, status="review" if held else "published", youtube_id=vid, location=location)
+        update_history(job_id, status="review" if held else "published", youtube_id=vid, location=location, finished_ts=int(datetime.now().timestamp()))
         set_stage("job complete", step=status["steps"])
     except Cancelled:
-        update_history(job_id, status="cancelled")
+        update_history(job_id, status="cancelled", finished_ts=int(datetime.now().timestamp()))
         logger.warning("Job %s cancelled", job_id)
         raise
     except Exception as e:
-        update_history(job_id, status="failed", error=str(e)[:300])
+        update_history(job_id, status="failed", error=str(e)[:300], finished_ts=int(datetime.now().timestamp()))
         raise
     finally:
         if compliance and not finalized and job_dir.exists():
@@ -1669,6 +1670,7 @@ def api_status():
         "storage_free_gb": round(free, 1) if free is not None else None,
         "delete_after_publish": s["delete_after_publish"],
         "history": st["history"][:25],
+        "now": int(datetime.now().timestamp()),
     }
 
 
