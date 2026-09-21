@@ -931,7 +931,7 @@ def ensure_models(s, engine):
             raise RuntimeError(f"'{vm}' is a text model and cannot check images. Pick a vision model such as qwen2.5vl:7b in Settings")
 
 
-def ollama_call(s, prompt, temperature=0.9, model=None, images=None, num_predict=2048, as_json=True):
+def ollama_call(s, prompt, temperature=0.9, model=None, images=None, num_predict=2048, as_json=True, keep_alive="5m"):
     url = f"{s['ollama_url'].rstrip('/')}/api/generate"
     model = model or s["ollama_model"]
     timeout = max(30, int(s["ollama_timeout"]))
@@ -939,7 +939,7 @@ def ollama_call(s, prompt, temperature=0.9, model=None, images=None, num_predict
         "model": model,
         "prompt": prompt,
         "stream": False,
-        "keep_alive": "5m",
+        "keep_alive": keep_alive,
         "options": {"temperature": temperature, "num_predict": num_predict, "num_ctx": 8192},
     }
     if as_json:
@@ -1347,10 +1347,10 @@ def kids_vision_check(s, clip_path):
     problems = []
     unclear = []
     try:
-        desc = ollama_call(s, "Describe this image in one short sentence.", temperature=0.1, model=model, images=images, num_predict=80, as_json=False).strip()
+        desc = ollama_call(s, "Describe this image in one short sentence.", temperature=0.1, model=model, images=images, num_predict=80, as_json=False, keep_alive="30s").strip()
         def ask(q):
             for _ in range(2):
-                a = yes_no(ollama_call(s, q, temperature=0.0, model=model, images=images, num_predict=10, as_json=False))
+                a = yes_no(ollama_call(s, q, temperature=0.0, model=model, images=images, num_predict=10, as_json=False, keep_alive="30s"))
                 if a is not None:
                     return a
             return None
@@ -1752,56 +1752,88 @@ def run_job(s):
                         raise
                     stop_event.wait(10)
 
-        for i, scene in enumerate(script["scenes"], 1):
-            set_stage(f"generating scene {i}/{n}", step=2 + i)
-            path = job_dir / f"clip_{i:02d}.mp4"
-            build_scene(i, scene, path)
-            clips.append(path)
+        anatomy_flags = []
+        batch_pending = []
+        inline = kids
 
-        anatomy_note = ""
-        safety_hits = set()
-        if kids:
-            pending = list(range(1, n + 1))
+        def judge(i, rnd):
+            try:
+                kids_vision_check(s, clips[i - 1])
+                vision_log.append({"clip": i, "round": rnd, "result": "passed"})
+                return "pass"
+            except Cancelled:
+                raise
+            except VisionUnavailable as e:
+                if s["kids_manual_review"]:
+                    logger.warning("Scene %d: %s. Continuing, check this video manually before publishing", i, e)
+                    vision_log.append({"clip": i, "round": rnd, "result": f"skipped: {e}"[:300]})
+                    return "pass"
+                raise
+            except VisionReject as e:
+                logger.warning("Scene %d attempt %d rejected: %s", i, rnd, e)
+                vision_log.append({"clip": i, "round": rnd, "result": str(e)[:300]})
+                return "unsafe" if e.safety else "anatomy"
+
+        def settle(i, verdict):
+            if verdict == "unsafe":
+                raise RuntimeError(f"Scene {i} still failed the safety check after 3 attempts")
+            if verdict == "anatomy":
+                logger.warning("Scene %d may still have an anatomy glitch after 3 attempts, keeping it. Check it before publishing", i)
+                anatomy_flags.append(i)
+
+        for i, scene in enumerate(script["scenes"], 1):
+            path = job_dir / f"clip_{i:02d}.mp4"
+            clips.append(path)
+            verdict = "pass"
+            for attempt in range(1, 4):
+                set_stage(f"generating scene {i}/{n}" + (f" (attempt {attempt})" if attempt > 1 else ""), step=(1 + 2 * i) if inline else (2 + i))
+                path.unlink(missing_ok=True)
+                build_scene(i, scene, path)
+                if not inline:
+                    if kids:
+                        batch_pending.append(i)
+                    verdict = "pass"
+                    break
+                set_stage(f"checking scene {i}/{n}" + (f" (attempt {attempt})" if attempt > 1 else ""), step=2 + 2 * i)
+                try:
+                    verdict = judge(i, attempt)
+                except VisionUnavailable as e:
+                    logger.warning("Checking scenes right after drawing failed (%s). Switching to checking after all scenes are drawn", e)
+                    inline = False
+                    batch_pending.append(i)
+                    verdict = "pass"
+                    break
+                if verdict == "pass":
+                    break
+            if inline:
+                settle(i, verdict)
+
+        if batch_pending:
+            pending = batch_pending
             for rnd in range(1, 4):
                 unload_pipeline()
-                rejected = []
+                results = {}
                 for i in pending:
                     check()
-                    set_stage(f"vision check scene {i}/{n}", step=2 + n + i)
+                    set_stage(f"checking scene {i}/{n}", step=2 + n + i)
                     try:
-                        kids_vision_check(s, clips[i - 1])
-                        vision_log.append({"clip": i, "round": rnd, "result": "passed"})
-                    except Cancelled:
-                        raise
+                        results[i] = judge(i, rnd)
                     except VisionUnavailable as e:
-                        if s["kids_manual_review"]:
-                            logger.warning("Scene %d: %s. Continuing, check this video manually before publishing", i, e)
-                            vision_log.append({"clip": i, "round": rnd, "result": f"skipped: {e}"[:300]})
-                        else:
-                            raise RuntimeError(f"{e}. Frames were not verified, so nothing was uploaded")
-                    except Exception as e:
-                        logger.warning("Scene %d rejected (round %d): %s", i, rnd, e)
-                        vision_log.append({"clip": i, "round": rnd, "result": str(e)[:300]})
-                        rejected.append(i)
-                        if getattr(e, "safety", True):
-                            safety_hits.add(i)
-                        else:
-                            safety_hits.discard(i)
-                if not rejected:
+                        raise RuntimeError(f"{e}. Frames were not verified, so nothing was uploaded")
+                failed = [i for i, v in results.items() if v != "pass"]
+                if not failed:
                     break
                 if rnd == 3:
-                    unsafe = [i for i in rejected if i in safety_hits]
-                    if unsafe:
-                        raise RuntimeError(f"Scenes {unsafe} still failed the safety check after 3 rounds")
-                    flagged = ", ".join(str(i) for i in rejected)
-                    logger.warning("Scenes %s may still have anatomy glitches after 3 redraws, keeping them. Check them before publishing", flagged)
-                    anatomy_note = f"Possible anatomy glitches kept in scenes {flagged}"
+                    for i in failed:
+                        settle(i, results[i])
                     break
-                for i in rejected:
+                for i in failed:
                     set_stage(f"regenerating scene {i}/{n}", step=2 + i)
                     clips[i - 1].unlink(missing_ok=True)
                     build_scene(i, script["scenes"][i - 1], clips[i - 1])
-                pending = rejected
+                pending = failed
+
+        anatomy_note = f"Possible anatomy glitches kept in scenes {', '.join(str(i) for i in anatomy_flags)}" if anatomy_flags else ""
         if kids:
             compliance["vision_checks"] = vision_log
             if anatomy_note:
