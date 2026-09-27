@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 import requests
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from starlette.concurrency import run_in_threadpool
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2.credentials import Credentials
@@ -871,14 +872,22 @@ def fetch_trending(s, query=None):
     return kept
 
 
-def ollama_tags(s):
+_tags_cache = {"at": 0.0, "models": []}
+
+
+def ollama_tags(s, max_age=60):
+    now = datetime.now().timestamp()
+    if _tags_cache["models"] and now - _tags_cache["at"] < max_age:
+        return _tags_cache["models"]
     try:
-        r = requests.get(f"{s['ollama_url'].rstrip('/')}/api/tags", timeout=10)
+        r = requests.get(f"{s['ollama_url'].rstrip('/')}/api/tags", timeout=5)
         r.raise_for_status()
-        return sorted(m["name"] for m in r.json().get("models", []) if m.get("name"))
+        models = sorted(m["name"] for m in r.json().get("models", []) if m.get("name"))
+        _tags_cache.update({"at": now, "models": models})
+        return models
     except Exception as e:
         logger.debug("Could not list Ollama models: %s", e)
-        return []
+        return _tags_cache["models"]
 
 
 _caps_cache = {}
@@ -888,7 +897,7 @@ def ollama_caps(s, model):
     if model in _caps_cache:
         return _caps_cache[model]
     try:
-        r = requests.post(f"{s['ollama_url'].rstrip('/')}/api/show", json={"model": model}, timeout=10)
+        r = requests.post(f"{s['ollama_url'].rstrip('/')}/api/show", json={"model": model}, timeout=5)
         if r.status_code != 200:
             return None
         caps = set(r.json().get("capabilities") or [])
@@ -2043,8 +2052,7 @@ def api_status():
     }
 
 
-@app.get("/api/settings")
-def get_settings():
+def build_settings():
     g = load_global()
     if g["gemini_api_key"]:
         g["gemini_api_key"] = MASK
@@ -2063,9 +2071,18 @@ def get_settings():
     }
 
 
+@app.get("/api/settings")
+async def get_settings():
+    return await run_in_threadpool(build_settings)
+
+
 @app.post("/api/settings")
 async def post_settings(request: Request):
     body = await request.json()
+    return await run_in_threadpool(apply_settings, body)
+
+
+def apply_settings(body):
     with settings_lock:
         g = load_global()
         old_storage = g["storage_dir"]
