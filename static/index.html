@@ -116,7 +116,7 @@ td.title{font-weight:700}
 td .sub{font-size:12.5px;color:var(--muted);margin-top:6px;overflow-wrap:anywhere}
 td .sub.notes{color:var(--amber)}
 td .sub.err{color:var(--coral)}
-.st-published{--c:var(--sage)}.st-failed{--c:var(--coral)}.st-running{--c:var(--gold-text)}.st-review{--c:var(--violet)}.st-scheduled{--c:var(--sky)}.st-cancelled{--c:var(--muted)}
+.st-published{--c:var(--sage)}.st-failed{--c:var(--coral)}.st-running{--c:var(--gold-text)}.st-review{--c:var(--violet)}.st-scheduled{--c:var(--sky)}.st-cancelled{--c:var(--muted)}.st-interrupted{--c:var(--muted)}
 .links{display:flex;gap:6px}
 .empty{padding:36px 16px;text-align:center;color:var(--muted)}
 .source a{color:var(--text);text-decoration-color:var(--line)}
@@ -430,7 +430,7 @@ btn.disabled=false}
 
 async function activate(id){try{await api("/api/profiles/activate",{method:"POST",body:JSON.stringify({id})})}catch(e){alert(e.message)}await loadSettings();refresh()}
 
-const STATUS_TEXT={review:"Private, needs review",published:"Published",failed:"Failed",running:"Running",cancelled:"Cancelled",scheduled:"Scheduled"};
+const STATUS_TEXT={review:"Private, needs review",published:"Published",failed:"Failed",running:"Running",cancelled:"Cancelled",scheduled:"Scheduled",interrupted:"Interrupted"};
 function fmtDur(d){d=Math.max(0,d|0);const h=Math.floor(d/3600),m=Math.floor(d%3600/60),s=d%60;return h?`${h}h ${m}m`:m?`${m}m ${s}s`:`${s}s`}
 function fmtStart(t){if(!t)return"";const d=new Date(t.replace(" ","T"));if(isNaN(d))return t;return d.toLocaleString([], {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"})}
 

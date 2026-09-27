@@ -1991,7 +1991,23 @@ def run_loop():
         logger.info("Autopilot stopped")
 
 
+def reset_stale_jobs():
+    with state_lock:
+        st = load_state()
+        stale = [h for h in st["history"] if h.get("status") == "running"]
+        if not stale:
+            return
+        now = int(datetime.now().timestamp())
+        for h in stale:
+            h["status"] = "interrupted"
+            h["error"] = "The app stopped before this job finished"
+            h.setdefault("finished_ts", h.get("started_ts", now))
+        save_state(st)
+        logger.info("Marked %d unfinished job(s) from a previous run as interrupted", len(stale))
+
+
 migrate()
+reset_stale_jobs()
 app = FastAPI()
 
 
