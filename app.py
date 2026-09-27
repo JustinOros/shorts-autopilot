@@ -1108,7 +1108,7 @@ Every character is a cartoon: a cartoon animal, a cartoon creature, or a simple 
 
 The Short has exactly {n} scenes of {clip} seconds each. Each scene has:
 "visual": a detailed, self-contained shot description of one still image (setting, action, mood, lighting). Name the characters but do not re-describe their appearance, that comes from "characters". Never mention on-screen text or words.
-"narration": one spoken line of {max(4, words - 5)} to {words} words, so it fills most of the scene.
+"narration": one spoken line of {max(4, words - 5)} to {words} words, so it fills most of the scene. Write real words only, never stretched sounds like Mmm, Ahhh, Ooooh, or Shhh, because the narrator reads those letter by letter.
 
 Scene 1 must hook the viewer in the first 2 seconds. The final scene must deliver a payoff.
 
@@ -1548,6 +1548,40 @@ def generate_image(s, prompt, path):
     logger.info("Generated %s in %.1fs", path.name, (datetime.now() - started).total_seconds())
 
 
+SPEECH_FIXES = [
+    (r"\bm{2,}\b", "Yum"),
+    (r"\bmhm+\b", "Mm hmm"),
+    (r"\bhm{2,}\b", "Hmm"),
+    (r"\bo{2,}h*\b", "Ooh"),
+    (r"\ba{2,}h+\b", "Ah"),
+    (r"\bah{2,}\b", "Ah"),
+    (r"\bsh{2,}\b", "Shh"),
+    (r"\bw+o{2,}h*\b", "Whoa"),
+    (r"\bwh?e{2,}\b", "Whee"),
+    (r"\byay+\b", "Yay"),
+    (r"\bya{2,}y*\b", "Yay"),
+    (r"\bye{2,}h*\b", "Yeah"),
+    (r"\bhur+a+h*\b", "Hooray"),
+    (r"\bz{2,}\b", "Zzz"),
+    (r"\bbr{2,}\b", "Brr"),
+    (r"\bgr{2,}\b", "Grr"),
+    (r"\bha{2,}\b", "Ha ha"),
+    (r"\bhe{2,}\b", "Hee hee"),
+    (r"\bwo{2,}w+\b", "Wow"),
+]
+
+
+def speakable(text):
+    out = text
+    for pattern, replacement in SPEECH_FIXES:
+        out = re.sub(pattern, replacement, out, flags=re.I)
+    out = re.sub(r"([!?.,])\1{1,}", r"\1", out)
+    out = re.sub(r"\s{2,}", " ", out).strip()
+    if out != text:
+        logger.debug("Narration adjusted for speech: %r to %r", text, out)
+    return out
+
+
 def pick_tts(s):
     engine = s["tts_engine"] if s["tts_engine"] in TTS_ENGINES else "auto"
     if engine != "auto":
@@ -1577,7 +1611,7 @@ def system_speak(s, text, out_wav):
 
 
 def tts_speak(s, text, out_wav):
-    text = text.strip() or "..."
+    text = speakable(text.strip()) or "..."
     engine = pick_tts(s)
     try:
         if engine == "kokoro":
