@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 import requests
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
@@ -760,7 +761,14 @@ def load_creds(pid):
         return None
     creds = Credentials.from_authorized_user_file(str(tf), SCOPES)
     if creds.expired and creds.refresh_token:
-        creds.refresh(GoogleRequest())
+        try:
+            creds.refresh(GoogleRequest())
+        except RefreshError:
+            raise RuntimeError(
+                f"The YouTube sign in for profile '{load_profile(pid)['name']}' has expired. "
+                "Unlink and link the channel again in Settings. "
+                "Publishing the app in Google Cloud stops this happening every week"
+            ) from None
         tf.write_text(creds.to_json(), encoding="utf-8")
     return creds
 
@@ -1964,7 +1972,10 @@ def run_loop():
             except Cancelled:
                 break
             except Exception as e:
-                logger.exception("Job failed: %s", e)
+                if "has expired" in str(e):
+                    logger.error("%s", e)
+                else:
+                    logger.exception("Job failed: %s", e)
                 mins = max(1, int(s["error_cooldown_minutes"]))
                 set_stage(f"cooling down {mins} min after error")
                 stop_event.wait(mins * 60)
