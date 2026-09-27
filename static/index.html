@@ -319,6 +319,10 @@ const FIELDS=[
 ["piper_model","Piper voice file","wide","Blank uses the first voice found in the voices folder under Models","g"],
 ["gemini_api_key","Gemini API key (Veo)","password","Only needed for the Veo engine. Billing must be enabled","g"],
 ["veo_model","Veo model","text","e.g. veo-3.1-fast-generate-preview","g"],
+["","Performance","header","Shared by all profiles. Lower settings here if the Mac becomes slow or unstable",""],
+["low_memory","Low memory mode","checkbox","Generates images in smaller pieces. A little slower, much less memory. Leave on for Macs with 16 GB or less","g"],
+["free_models_between_stages","Free models between stages","checkbox","Unloads the writing model before images are drawn and the vision model after checks","g"],
+["cpu_threads","CPU threads","select:0=Automatic|2|4|6|8|10","Caps how many cores image generation uses so the rest of the Mac stays responsive","g"],
 ["","Writing and timing","header","Shared by all profiles",""],
 ["ollama_url","Ollama URL","text","","g"],
 ["ollama_model","Ollama model","model:text","Writes scripts and tags. Models not installed yet are downloaded automatically","g"],
@@ -332,7 +336,7 @@ const FIELDS=[
 ];
 const DAYS=[["mon","Mon"],["tue","Tue"],["wed","Wed"],["thu","Thu"],["fri","Fri"],["sat","Sat"],["sun","Sun"]];
 const TIMES=[];for(let h=0;h<24;h++)for(const m of [0,30]){const v=String(h).padStart(2,"0")+":"+String(m).padStart(2,"0");const hr=h%12||12;TIMES.push([v,hr+":"+String(m).padStart(2,"0")+(h<12?" AM":" PM")])}
-const NUMERIC=new Set(["sd_steps","sd_guidance","sd_width","sd_height","trending_days","trending_count","videos_per_day","minutes_between_videos","target_seconds","clip_seconds","ollama_timeout","error_cooldown_minutes","tts_rate"]);
+const NUMERIC=new Set(["sd_steps","sd_guidance","sd_width","sd_height","trending_days","trending_count","videos_per_day","minutes_between_videos","target_seconds","clip_seconds","ollama_timeout","error_cooldown_minutes","tts_rate","cpu_threads"]);
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 async function api(path,opts={}){const r=await fetch(path,{headers:{"Content-Type":"application/json"},...opts});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.detail||r.statusText);return j}
