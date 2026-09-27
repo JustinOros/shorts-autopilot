@@ -304,7 +304,19 @@ def published_root(s):
     return resolve_storage(s["storage_dir"]) / "published"
 
 
+def volume_ready(path):
+    parts = Path(path).resolve().parts
+    if len(parts) >= 3 and parts[1] == "Volumes":
+        mount = Path("/Volumes") / parts[2]
+        if not os.path.ismount(str(mount)):
+            return False, str(mount)
+    return True, ""
+
+
 def writable(root):
+    ok, mount = volume_ready(root)
+    if not ok:
+        raise ValueError(f"The volume {mount} is not mounted. Connect the disk, or pick a different folder in Settings")
     try:
         root.mkdir(parents=True, exist_ok=True)
         probe = root / ".write_test"
@@ -489,6 +501,15 @@ def sweep_temp(temp, max_age_hours=1):
             continue
     if removed:
         logger.info("Cleaned %d old items from the temp folder", removed)
+
+
+def check_storage_alive(s):
+    root = resolve_storage(s["storage_dir"])
+    ok, mount = volume_ready(root)
+    if not ok:
+        raise RuntimeError(f"The volume {mount} is no longer mounted, the disk may have unmounted. Nothing more was written")
+    if not root.is_dir():
+        raise RuntimeError(f"The storage folder {root} disappeared, the disk may have unmounted")
 
 
 def prepare_storage(s):
@@ -1889,6 +1910,7 @@ def run_job(s):
                 anatomy_flags.append(i)
 
         for i, scene in enumerate(script["scenes"], 1):
+            check_storage_alive(s)
             path = job_dir / f"clip_{i:02d}.mp4"
             clips.append(path)
             verdict = "pass"
@@ -1949,6 +1971,7 @@ def run_job(s):
                 compliance["anatomy_note"] = anatomy_note
                 prior = "; ".join(compliance.get("reviewer_notes", []))
                 update_history(job_id, notes=(prior + "; " if prior else "") + anatomy_note)
+        check_storage_alive(s)
         set_stage("stitching video", step=3 + n * 2)
         final = job_dir / "final.mp4"
         concat_clips(clips, final, s["aspect_ratio"])
@@ -2014,7 +2037,7 @@ def run_loop():
             except Cancelled:
                 break
             except Exception as e:
-                if "has expired" in str(e):
+                if "has expired" in str(e) or "not mounted" in str(e) or "unmounted" in str(e):
                     logger.error("%s", e)
                 else:
                     logger.exception("Job failed: %s", e)
