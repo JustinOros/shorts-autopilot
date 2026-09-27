@@ -456,7 +456,7 @@ const segs=$("#pg-segs");if(segs.childElementCount!==s.steps){segs.innerHTML="<i
 [...segs.children].forEach((el,i)=>{el.className=i<s.step-1?"on":i===s.step-1?"now":""});
 const pct=Math.min(100,Math.round(s.step*100/s.steps));
 $("#pg-meta").textContent=`Step ${s.step} of ${s.steps}, ${pct}% done`+(s.elapsed?`, running for ${fmtDur(s.elapsed)}`:"");
-}else{pg.classList.remove("show");note.hidden=false;note.textContent=s.running?"Waiting for the next video to start.":"Press GO to start making videos for the active profile."}
+}else{pg.classList.remove("show");note.hidden=false;note.textContent=s.running?(s.stage&&s.stage!=="idle"?"":"Waiting for the next video to start."):"Press GO to start making videos for the active profile."}
 lastChannel=s.channel||"";const lb=$("#link");if(lb){lb.textContent=s.channel?"Unlink YouTube channel":"Link YouTube channel"}const ls=$("#link-status");if(ls){ls.textContent=s.channel?"Linked to "+s.channel:"No channel linked yet"}
 setButton(s.running);
 const dur=h=>{if(!h.started_ts)return"";const end=h.finished_ts||(h.status==="running"?s.now:0);return end?fmtDur(end-h.started_ts):""};

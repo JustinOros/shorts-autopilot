@@ -2029,6 +2029,7 @@ def run_loop():
             if limit > 0 and published_today(s["profile_id"]) >= limit:
                 if status["stage"] != "daily limit reached":
                     logger.info("Profile '%s' reached its daily limit of %d, waiting for tomorrow", s["name"], limit)
+                    reset_progress()
                 set_stage("daily limit reached", log=False)
                 stop_event.wait(60)
                 continue
@@ -2045,6 +2046,7 @@ def run_loop():
                 set_stage(f"cooling down {mins} min after error")
                 stop_event.wait(mins * 60)
                 continue
+            reset_progress()
             gap = int(s["minutes_between_videos"])
             if gap > 0 and not stop_event.is_set():
                 set_stage(f"waiting {gap} min before next video")
